@@ -9,11 +9,14 @@ identity immediately before the signal is sent - because a pid measured a moment
 earlier can exit and have its number reused. The README "Safety" section and
 [`docs/architecture.md`](docs/architecture.md) document the full reasoning.
 
-The install path is part of that surface too: the executable is installed
+The install path is part of that surface too. The executable is installed
 root-owned and non-writable by other accounts, and installation is refused
-outright if the destination directory is group- or world-writable, since any
-account that can write there would be choosing what root executes every
-interval.
+outright unless every directory leading to it - and to the LaunchDaemon - is
+root-owned and writable by nobody else. Checking the leaf's mode alone would
+miss two shapes: a `0755` directory owned by another account, which that account
+can still write, and a writable ancestor, which lets it replace the directory
+entirely. The watchdog applies the same rule to its state directory before
+creating lock and state files at predictable names there as root.
 
 ## Supported versions
 

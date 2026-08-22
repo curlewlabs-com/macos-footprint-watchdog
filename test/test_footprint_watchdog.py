@@ -224,6 +224,69 @@ class FindTargetsTest(unittest.TestCase):
         self.assertEqual([pid for pid, _ in fw.find_targets("/sbin/launchd") if pid == 1], [])
 
 
+class TargetKeyTest(unittest.TestCase):
+    def test_specs_that_sanitize_alike_do_not_collide(self) -> None:
+        # Both of these become "tmp_a_b" if the key is just a character
+        # substitution, which would hand two different targets one lock file and
+        # one cooldown stamp - so restarting either would suppress the other.
+        self.assertNotEqual(fw.target_key("/tmp/a/b"), fw.target_key("/tmp/a_b"))
+
+    def test_aliases_of_one_target_share_a_key(self) -> None:
+        # /tmp is a symlink to /private/tmp, so these name one process. Two keys
+        # would mean two installs with independent cooldowns, each free to
+        # signal a process the other had just restarted.
+        self.assertEqual(fw.target_key("/tmp/x"), fw.target_key("/private/tmp/x"))
+
+    def test_key_is_usable_as_a_filename_and_a_launchd_label(self) -> None:
+        key = fw.target_key("/System/Library/Frameworks/Foo.framework/fseventsd")
+        self.assertNotIn("/", key)
+        self.assertRegex(key, r"^[A-Za-z0-9_.-]+$")
+
+    def test_key_still_names_its_target_readably(self) -> None:
+        self.assertTrue(fw.target_key("fseventsd").startswith("fseventsd-"))
+
+
+class UnsafePathTest(unittest.TestCase):
+    def setUp(self) -> None:
+        # realpath, because unsafe_path_owners reports resolved components and
+        # mkdtemp hands back a /var/folders path that is itself behind a symlink.
+        self.directory = os.path.realpath(
+            tempfile.mkdtemp(prefix="footprint-watchdog-paths.")
+        )
+        self.addCleanup(subprocess.run, ["rm", "-rf", self.directory], check=False)
+
+    def test_a_system_directory_is_safe(self) -> None:
+        self.assertEqual(fw.unsafe_path_owners("/usr/bin"), [])
+
+    def test_a_world_writable_directory_is_unsafe(self) -> None:
+        self.assertIn("/private/tmp", fw.unsafe_path_owners("/tmp"))
+
+    def test_a_non_root_owned_directory_is_unsafe_even_at_0755(self) -> None:
+        # The case a mode-only check misses: 0755 looks locked down, but the
+        # owning account can still replace anything in it, and that account is
+        # not root.
+        target = os.path.join(self.directory, "sbin")
+        os.makedirs(target, mode=0o755)
+        self.assertIn(target, fw.unsafe_path_owners(target))
+
+    def test_a_writable_ancestor_makes_a_locked_leaf_unsafe(self) -> None:
+        # A leaf nobody can write is no protection if its parent can be swapped
+        # out from under it.
+        parent = os.path.join(self.directory, "parent")
+        leaf = os.path.join(parent, "leaf")
+        os.makedirs(leaf)
+        os.chmod(parent, 0o777)
+        self.assertIn(parent, fw.unsafe_path_owners(leaf))
+
+    def test_a_path_that_does_not_exist_is_judged_by_its_parent(self) -> None:
+        # Nothing has been created yet at install time; what matters is who can
+        # create it.
+        missing = os.path.join(self.directory, "not-created-yet")
+        self.assertEqual(
+            fw.unsafe_path_owners(missing), fw.unsafe_path_owners(self.directory)
+        )
+
+
 class ReadSampleTest(unittest.TestCase):
     def test_footprint_reflects_a_real_allocation(self) -> None:
         target = TargetProcess(mib=64)

@@ -35,6 +35,7 @@ import argparse
 import ctypes
 import errno
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -54,6 +55,7 @@ EXIT_TARGET_AMBIGUOUS = 5
 EXIT_COOLDOWN_SUPPRESSED = 6
 EXIT_RESPAWN_FAILED = 7
 EXIT_REPLACEMENT_ABOVE_CEILING = 8
+EXIT_UNSAFE_PATH = 9
 
 DEFAULT_STATE_DIR = "/var/db/footprint-watchdog"
 DEFAULT_COOLDOWN_SECONDS = 3600
@@ -225,6 +227,66 @@ def pid_path(pid: int) -> Optional[str]:
     if length <= 0:
         return None
     return buffer.value.decode("utf-8", "replace")
+
+
+def canonical_spec(spec: str) -> str:
+    """The single form of a target spec that identity decisions are made on.
+
+    proc_pidpath reports resolved paths, so an absolute spec is resolved too or
+    the comparison fails on any symlinked prefix: `/tmp/x` never matches, because
+    the kernel reports the process as `/private/tmp/x`. Everything that names a
+    target - the matcher, the lock, the cooldown stamp, the launchd label - goes
+    through here, so two spellings of one process cannot be treated as two.
+    """
+    return os.path.realpath(spec) if spec.startswith("/") else spec
+
+
+def target_key(spec: str) -> str:
+    """A key naming one target, safe as a filename and as a launchd label.
+
+    Two properties the obvious sanitize-to-underscores approach does not have.
+    Distinct targets never collide: `/tmp/a/b` and `/tmp/a_b` both sanitize to
+    `tmp_a_b`, which would give two processes one lock and one cooldown stamp.
+    And aliases of one target never split: `/tmp/x` and `/private/tmp/x` are the
+    same process, so a watchdog installed under each spelling would otherwise
+    hold two independent cooldowns and signal it twice.
+
+    The digest carries uniqueness; the readable prefix is there so an operator
+    reading `launchctl list` or the state directory can tell what a key names.
+    """
+    canonical = canonical_spec(spec)
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:12]
+    readable = re.sub(r"[^A-Za-z0-9_.-]", "_", os.path.basename(canonical))[:40]
+    return "%s-%s" % (readable or "target", digest)
+
+
+def unsafe_path_owners(path: str) -> List[str]:
+    """Components of `path` that an account other than root could replace.
+
+    Every directory on the way to a file root executes, or writes state into,
+    has to be root-owned and not writable by group or other. Checking only the
+    leaf's write bits is not enough twice over: a leaf owned by a non-root
+    account is writable by that account whatever its mode says, and a writable
+    ancestor lets that account swap the whole directory out from under the leaf.
+
+    A path that does not exist yet is governed by the nearest ancestor that
+    does, since that is what decides who can create it.
+    """
+    problems: List[str] = []
+    current = os.path.realpath(path)
+    while not os.path.exists(current):
+        parent = os.path.dirname(current)
+        if parent == current:
+            return problems
+        current = parent
+    while True:
+        info = os.stat(current)
+        if info.st_uid != 0 or (info.st_mode & 0o022):
+            problems.append(current)
+        parent = os.path.dirname(current)
+        if parent == current:
+            return problems
+        current = parent
 
 
 def find_targets(spec: str) -> List[Tuple[int, str]]:
@@ -492,9 +554,26 @@ def main(
         emit({"event": "state_dir_unusable", "path": state_dir, "reason": str(exc)}, out)
         return EXIT_USAGE
 
-    safe_spec = re.sub(r"[^A-Za-z0-9_.-]", "_", spec.lstrip("/"))
-    lock_path = os.path.join(state_dir, safe_spec + ".lock")
-    state_path = os.path.join(state_dir, safe_spec + ".state.json")
+    unsafe = unsafe_path_owners(state_dir)
+    if unsafe:
+        # Root is about to create a lock and a state file at predictable names
+        # in here. If any account other than root can write a component of this
+        # path, it can pre-place a symlink at either name and choose where root
+        # writes.
+        emit(
+            {
+                "event": "state_dir_unsafe",
+                "path": state_dir,
+                "unsafe_components": unsafe,
+                "reason": "not root-owned, or writable by a non-root account",
+            },
+            out,
+        )
+        return EXIT_UNSAFE_PATH
+
+    key = target_key(spec)
+    lock_path = os.path.join(state_dir, key + ".lock")
+    state_path = os.path.join(state_dir, key + ".state.json")
 
     # A tick can outlive its interval while waiting for a respawn, so two ticks
     # can overlap. Whoever holds the lock is already handling this target;

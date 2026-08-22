@@ -18,12 +18,15 @@ import argparse
 import filecmp
 import os
 import plistlib
-import re
 import shutil
 import subprocess
 import sys
 import tempfile
 from typing import Dict, List, Optional, Tuple
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import footprint_watchdog as fw
 
 REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 SOURCE_NAME = "footprint_watchdog.py"
@@ -40,7 +43,14 @@ INTERPRETER = "/usr/bin/python3"
 
 
 def label_for(process: str) -> str:
-    return "%s.%s" % (LABEL_PREFIX, re.sub(r"[^A-Za-z0-9_.-]", "_", process.lstrip("/")))
+    """The launchd label for a target.
+
+    Keyed by footprint_watchdog.target_key so the job, the lock, and the
+    cooldown stamp all name a target the same way. Sanitizing the raw spec here
+    instead would let two different targets collide onto one label - and one
+    install would then overwrite the other's job file.
+    """
+    return "%s.%s" % (LABEL_PREFIX, fw.target_key(process))
 
 
 def plist_path_for(process: str) -> str:
@@ -95,18 +105,22 @@ def prepare_install_dir(directory: str) -> None:
     installed there, so creating it is part of the job rather than a
     precondition to report.
 
-    The installed file is executed by root every interval. If the directory it
-    sits in is group- or world-writable - which /usr/local often is on a Mac
-    where a package manager took ownership - then any account that can write
-    there chooses what root runs.
+    The installed file is executed by root every interval, so every directory on
+    the way to it has to be root-owned and not writable by anyone else - which
+    /usr/local often is not, on a Mac where a package manager took ownership.
     """
     if not os.path.isdir(directory):
         os.makedirs(directory, mode=0o755)
-    mode = os.stat(directory).st_mode
-    if mode & 0o022:
+    require_root_only_path(directory, "install into")
+
+
+def require_root_only_path(path: str, action: str) -> None:
+    unsafe = fw.unsafe_path_owners(path)
+    if unsafe:
         sys.stderr.write(
-            "refusing to install into %s: mode %o lets a non-root account replace "
-            "what root executes every interval\n" % (directory, mode & 0o777)
+            "refusing to %s %s: %s %s not root-owned, or writable by a non-root "
+            "account, so that account chooses what root executes\n"
+            % (action, path, ", ".join(unsafe), "is" if len(unsafe) == 1 else "are")
         )
         raise SystemExit(2)
 
@@ -172,6 +186,7 @@ def do_install(args: argparse.Namespace) -> int:
         context_command=args.context_command,
         signal_name=args.signal,
     )
+    require_root_only_path(LAUNCH_DAEMONS, "write a LaunchDaemon into")
     write_plist(plist_path, contents)
     print("installed %s" % plist_path)
 
@@ -199,6 +214,11 @@ def verify_problems(args: argparse.Namespace) -> List[Tuple[str, str]]:
     plist_path = plist_path_for(str(args.process))
     problems: List[Tuple[str, str]] = []
 
+    for component in fw.unsafe_path_owners(os.path.dirname(executable)):
+        problems.append(("executable_dir_unsafe", component))
+    for component in fw.unsafe_path_owners(LAUNCH_DAEMONS):
+        problems.append(("launchdaemon_dir_unsafe", component))
+
     if not os.path.exists(executable):
         problems.append(("executable_missing", executable))
     else:
@@ -215,6 +235,14 @@ def verify_problems(args: argparse.Namespace) -> List[Tuple[str, str]]:
     if not os.path.exists(plist_path):
         problems.append(("launchdaemon_missing", plist_path))
     else:
+        info = os.stat(plist_path)
+        # launchd itself refuses a job file that is not root-owned or that
+        # others can write, so drift here does not merely differ from the
+        # source - it stops the watchdog from loading at all.
+        if info.st_uid != 0:
+            problems.append(("launchdaemon_not_root_owned", plist_path))
+        if info.st_mode & 0o022:
+            problems.append(("launchdaemon_writable_by_non_root", plist_path))
         with open(plist_path, "rb") as stream:
             installed = plistlib.load(stream)
         expected = build_plist(

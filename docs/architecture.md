@@ -115,6 +115,38 @@ measurement and the `kill` the process can exit and the kernel can reuse its pid
 for something unrelated. The path is re-checked at the last moment rather than
 assumed to have held.
 
+## Naming a target
+
+The lock file, the cooldown stamp, and the launchd label all have to name the
+same target as the matcher does, and the obvious approach - substitute unsafe
+characters in the raw `--process` string - gets this wrong in both directions.
+
+`/tmp/a/b` and `/tmp/a_b` both become `tmp_a_b`, so two different targets would
+share one lock and one cooldown stamp, and each restart would suppress the
+other's. Meanwhile `/tmp/x` and `/private/tmp/x` produce different strings for
+one process, so a watchdog installed under each spelling would hold two
+independent cooldowns and could signal a process the other had just restarted.
+
+`target_key` therefore canonicalizes through the same `canonical_spec` the
+matcher uses, then appends a digest of that canonical form. The readable prefix
+is for whoever reads `launchctl list` or the state directory; the digest is what
+makes the key unique.
+
+## Paths root writes to, or executes from
+
+Every directory on the way to the installed executable, to the LaunchDaemon, and
+to the state directory must be root-owned and not writable by group or other.
+Two shapes make a leaf-only mode check insufficient: a directory at `0755` owned
+by some account other than root is writable by that account whatever its mode
+says, and a writable ancestor lets that account replace the directory wholesale.
+For the state directory the concrete attack is a symlink pre-placed at the lock
+or state path, which would redirect a root write; for the executable and the
+plist it is simply substituting what root runs every interval.
+
+`unsafe_path_owners` walks from the resolved path up to the root and reports
+every component that fails either test. A path that does not exist yet is judged
+by the nearest ancestor that does, since that is what decides who can create it.
+
 ## The restart, and proving it worked
 
 The signal is `TERM` by default; `KILL` is available but is not the default,

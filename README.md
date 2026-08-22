@@ -68,8 +68,9 @@ how you change settings - it rewrites the job and reloads it.
 
 `--verify` needs no privileges and exits non-zero on any drift: a plist someone
 edited in place, an executable that no longer matches the source, an install
-that lost root ownership, or one that became writable by a non-root account. Run
-it from configuration management to catch a host that quietly diverged.
+that lost root ownership, a plist launchd would refuse, or an install directory
+some other account controls. Run it from configuration management to catch a
+host that quietly diverged.
 
 Other options: `--interval` (seconds between checks, default 300), `--cooldown`
 (minimum seconds between restarts, default 3600), `--log` (default
@@ -135,6 +136,7 @@ must never trigger one.
 | 6 | Above the ceiling but inside the cooldown - suppressed |
 | 7 | Signalled, but no replacement appeared |
 | 8 | Replacement appeared and is already above the ceiling |
+| 9 | The state directory, or something above it, is not root-only |
 
 Codes 6, 7 and 8 are the ones worth alerting on. Each means the failure is not
 being fixed by restarting, which is a different problem from the one this tool
@@ -161,9 +163,13 @@ to the wrong thing.
 - **Recovery is verified, not assumed.** It waits for a *different* pid running
   the same executable, then measures that one. "The old process is gone" is not
   accepted as success.
-- **The install refuses a writable destination.** If the install directory is
-  group- or world-writable, any account that can write there would be choosing
-  what root executes every interval, so installation stops.
+- **The install refuses a destination root does not solely control.** Every
+  directory on the way to the installed executable, and to the LaunchDaemon,
+  must be root-owned and not writable by anyone else. A mode check alone is not
+  enough: a `0755` directory owned by some other account is still writable by
+  that account, and a writable ancestor lets it swap the whole directory out.
+  The watchdog applies the same rule to its state directory before creating
+  predictable lock and state paths there as root.
 - **`TERM`, not `KILL`, by default.**
 
 Reporting a security issue: see [SECURITY.md](SECURITY.md). Please use private

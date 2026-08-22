@@ -124,11 +124,19 @@ class VerifyTest(unittest.TestCase):
     def codes(self) -> List[str]:
         return [code for code, _ in install.verify_problems(self.args)]
 
-    def test_matching_content_reports_no_content_drift(self) -> None:
-        # A test cannot create a root-owned file, so the ownership check fires
-        # here by construction. Asserting it is the ONLY finding is what proves
-        # the content and plist comparisons both passed.
-        self.assertEqual(self.codes(), ["executable_not_root_owned"])
+    def test_matching_content_reports_no_content_or_plist_drift(self) -> None:
+        # A test cannot create root-owned files in a root-owned directory, so
+        # the ownership findings fire here by construction. What this asserts is
+        # that neither comparison found a difference; the mutation cases below
+        # prove those same comparisons do fire when there is one.
+        codes = self.codes()
+        self.assertNotIn("executable_content_differs", codes)
+        self.assertNotIn("launchdaemon_differs", codes)
+
+    def test_an_install_directory_a_non_root_account_owns_is_drift(self) -> None:
+        # The prefix here is a temp directory owned by the test user - the exact
+        # shape that lets an account other than root replace what root runs.
+        self.assertIn("executable_dir_unsafe", self.codes())
 
     def test_an_edited_plist_is_drift(self) -> None:
         # The case this exists for: someone changed the ceiling on one host by
