@@ -1,0 +1,49 @@
+name: CI
+
+# Gate every PR (and post-merge main) on the checks a contributor runs locally:
+# strict pyright anywhere, and the real-process test suite on macOS. See the
+# README "Development" section.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: 24.14.0
+      # Type checking is platform-independent: pyrightconfig.json pins
+      # pythonPlatform to Darwin, so the macOS-only stdlib calls resolve here.
+      - name: pyright (strict)
+        run: npx --yes pyright@1.1.409
+
+  test:
+    # Both images, because the measurement reads a kernel task-accounting
+    # structure: a layout or semantic change between major macOS versions is
+    # exactly the regression this suite exists to catch, and it would be
+    # invisible on a single image.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-26]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+      # The suite compiles its own target process (test/footprint_target.c
+      # explains why nothing already on the system can serve as one) and reads
+      # the real ledger. `cc` and /usr/bin/python3 both come from the Command
+      # Line Tools that are preinstalled on these images.
+      - name: unit and integration tests
+        run: /usr/bin/python3 -m unittest discover -s test -v

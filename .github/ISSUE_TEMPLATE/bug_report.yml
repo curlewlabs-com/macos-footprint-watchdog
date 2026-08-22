@@ -1,0 +1,54 @@
+name: Bug report
+description: Report incorrect behavior, a crash, or unexpected output
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For a **security** issue - anything about which process gets signalled,
+        privilege boundaries, or the root LaunchDaemon install - do not file
+        here. Use the Security tab's **"Report a vulnerability"** instead.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you expected versus what actually occurred.
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Exact command
+      description: The full command line, including whether it ran as root.
+      placeholder: sudo footprint-watchdog --process fseventsd --ceiling 2GiB
+      render: shell
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+      description: Output of `sw_vers -productVersion`, plus Apple silicon or Intel.
+      placeholder: "26.6.1, Apple silicon"
+    validations:
+      required: true
+  - type: textarea
+    id: records
+    attributes:
+      label: Watchdog records
+      description: >
+        The JSON lines around the problem. A scheduled install logs to
+        `/var/log/footprint-watchdog.log` by default.
+      render: shell
+    validations:
+      required: false
+  - type: textarea
+    id: target
+    attributes:
+      label: Target process
+      description: >
+        Output of `sudo footprint-watchdog --process <target> --ceiling 1 --dry-run`,
+        which reports what the tool resolves and measures without signalling anything.
+      render: shell
+    validations:
+      required: false

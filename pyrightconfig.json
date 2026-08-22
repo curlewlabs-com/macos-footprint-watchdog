@@ -1,0 +1,6 @@
+{
+  "include": ["footprint_watchdog.py", "install.py", "test"],
+  "typeCheckingMode": "strict",
+  "pythonVersion": "3.9",
+  "pythonPlatform": "Darwin"
+}
