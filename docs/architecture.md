@@ -11,12 +11,11 @@ crash and does not log. Its footprint grows over days until the host is paging
 heavily, at which point every other workload on the machine slows down and the
 cause is not obvious from any single process's CPU time.
 
-The specific case this was built for was an `fseventsd` on a busy CI host: a
-31.5 GiB physical footprint after about 13 days of uptime, with all but a few
-MiB of it swapped out, on a 12-core machine whose one-minute load average had
-reached 143 and whose 42 GiB of swap was essentially full. About 92 million live
-small allocations, dominated by path strings. Restarting the daemon replaced it
-with one holding 4.2 MiB and released roughly 19 GiB of swap immediately.
+The specific case this was built for was an `fseventsd` on a busy CI host,
+grown over days into tens of gigabytes of live small allocations dominated by
+path strings, with nearly all of it swapped out and the machine's swap close to
+full. Restarting the daemon returned it to a few MiB and released the swap
+immediately.
 
 Two properties of that failure drive the whole design:
 
@@ -51,15 +50,16 @@ alternatives were considered and rejected on measured grounds.
 **RSS moves the wrong way.** As a runaway process pushes the machine into
 swap, its own pages are compressed and paged out, and RSS stops counting them.
 RSS therefore falls as the failure worsens. In the motivating failure nearly the
-entire 31.5 GiB was swapped out - invisible to RSS. A threshold on RSS would be
+entire footprint was swapped out - invisible to RSS. A threshold on RSS would be
 least likely to fire exactly when it most needed to.
 
 **`vmmap -summary` prints the right number at the wrong price.** It walks the
 process's entire VM map, at a cost proportional to the number of allocations
 held. Measured on a synthetic process holding 8 million allocations: 22.3
-seconds. The motivating failure held roughly 92 million. Spending minutes of CPU
-on a host that is already collapsing, in order to take a reading, is not a
-reasonable trade - and it would have to be paid on the tick that matters most.
+seconds. A daemon far enough gone to need restarting holds many times that.
+Spending minutes of CPU on a host that is already collapsing, in order to take a
+reading, is not a reasonable trade - and it would have to be paid on the tick
+that matters most.
 
 **`footprint(1)` is fast but lossy.** 0.35 seconds on that same process, but it
 emits a value rounded to three significant figures under a unit label that reads

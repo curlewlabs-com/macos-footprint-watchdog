@@ -12,21 +12,22 @@ unbounded over days of uptime.
 
 Metric: `phys_footprint` from the kernel's per-task ledger, not RSS. Under the
 memory pressure a runaway daemon creates, its own pages get compressed and
-swapped out, so RSS *falls* as the failure worsens. The observation that
-motivated this tool held a 31.5 GiB footprint with all but a few MiB of it
-swapped out - pages RSS does not count at all. Footprint counts them, which is
-why it is the governed signal and RSS is not.
+swapped out, so RSS *falls* as the failure worsens. A badly runaway daemon ends
+up with essentially all of its footprint swapped out - pages RSS does not count
+at all. Footprint counts them, which is why it is the governed signal and RSS is
+not.
 
 Source: `proc_pid_rusage`, the same task-accounting ledger `vmmap` and
 `footprint(1)` report from - read directly rather than by parsing either one.
 `vmmap -summary` walks the whole VM map, which costs time proportional to the
-allocation count: measured at 22.3s for a process holding 8M allocations, and
-the failure this was written for held ~92M. Spending minutes of CPU to take a
-measurement is not an option on a host that is already collapsing. `footprint(1)`
-is fast but prints a value rounded to three significant figures ("694 MB" for
-727,253,808 bytes) under a unit label that reads as MB but means MiB. The ledger
-read here is a `uint64` of bytes with no parsing step and no rounding, so the
-crossing value in the log is the exact number the decision was made on.
+allocation count: measured at 22.3s for a process holding 8M allocations, and a
+daemon far enough gone to need restarting holds many times that. Spending
+minutes of CPU to take a measurement is not an option on a host that is already
+collapsing. `footprint(1)` is fast but prints a value rounded to three
+significant figures ("694 MB" for 727,253,808 bytes) under a unit label that
+reads as MB but means MiB. The ledger read here is a `uint64` of bytes with no
+parsing step and no rounding, so the crossing value in the log is the exact
+number the decision was made on.
 """
 
 from __future__ import annotations

@@ -28,10 +28,8 @@ ceiling it writes nothing at all.
 here with. It is the macOS file-system events daemon, and on a machine with
 heavy, sustained file churn - a CI host, a build farm, a machine running many
 working copies - it can accumulate path-matching state until its footprint is
-tens of gigabytes. The observed failure held a **31.5 GiB** footprint with all
-but a few MiB swapped out, after about 13 days of uptime, on a 12-core host
-whose one-minute load average had reached 143. Restarting the daemon dropped it
-to **4.2 MiB** and released roughly 19 GiB of swap immediately.
+tens of gigabytes, most of it swapped out. Nothing in the daemon reclaims it,
+so the host pages harder and harder until every other workload on it stalls.
 
 The daemon rebuilds whatever it actually needs, so a restart is cheap. What it
 loses is event history that Spotlight and Time Machine consume, which they
@@ -116,11 +114,11 @@ One line of JSON per event, and nothing at all on a healthy tick.
 
 ```json
 {"event": "ceiling_crossed", "process": "fseventsd", "ceiling_bytes": 2147483648,
- "before": {"pid": 102, "footprint_bytes": 33822867456, "age_seconds": 1116000.0, ...},
- "host": {"load_average": [143.57, 217.12, 165.29], "swap": "total = 43008.00M used = 42489.00M ..."}}
+ "before": {"pid": 102, "footprint_bytes": 24696061952, "age_seconds": 604800.0, ...},
+ "host": {"load_average": [88.41, 92.15, 71.60], "swap": "total = 32768.00M used = 31904.00M ..."}}
 {"event": "recovered", "process": "fseventsd",
- "before": {"pid": 102, "footprint_bytes": 33822867456, ...},
- "after": {"pid": 78708, "footprint_bytes": 4404019, "age_seconds": 1.2, ...}}
+ "before": {"pid": 102, "footprint_bytes": 24696061952, ...},
+ "after": {"pid": 78708, "footprint_bytes": 3862528, "age_seconds": 1.2, ...}}
 ```
 
 `before` and `after` are why the record exists: they show whether the restart
@@ -194,17 +192,17 @@ alternatives are all wrong in ways that only show up during the failure.
 
 **Not RSS.** As a runaway process drives the machine into swap, its own pages
 are compressed and paged out - and RSS stops counting them. RSS therefore
-*falls* as the failure gets worse. The observed `fseventsd` failure had
-essentially its entire 31.5 GiB swapped out. Footprint counts compressed and
+*falls* as the failure gets worse, and a badly runaway daemon ends up with
+essentially all of its footprint swapped out. Footprint counts compressed and
 swapped pages; RSS is the one number guaranteed to under-report exactly when it
 matters.
 
 **Not `vmmap`.** `vmmap -summary` prints the same footprint value, but it walks
 the process's entire VM map to do it, at a cost proportional to how many
 allocations the process holds. Measured on a process holding 8 million
-allocations: **22.3 seconds**. The `fseventsd` failure held roughly 92 million.
-Spending minutes of CPU to take a measurement, on a host that is already
-collapsing, is not a reasonable thing to do.
+allocations: **22.3 seconds**. A daemon far enough gone to need restarting holds
+many times that. Spending minutes of CPU to take a measurement, on a host that
+is already collapsing, is not a reasonable thing to do.
 
 **Not `footprint(1)`.** It is fast (0.35s on that same process) but it prints a
 value rounded to three significant figures, under a unit label that says `MB`
