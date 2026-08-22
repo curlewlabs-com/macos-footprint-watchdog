@@ -21,7 +21,7 @@ import sys
 import tempfile
 import time
 import unittest
-from typing import Dict, List, Optional, Tuple, cast
+from typing import Dict, List, Optional, Set, Tuple, cast
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -76,6 +76,14 @@ def setUpModule() -> None:
 def tearDownModule() -> None:
     if _build_dir:
         subprocess.run(["rm", "-rf", _build_dir], check=False)
+
+
+def _ps_pids() -> Set[int]:
+    """Every pid ps can see, as an independent check on the ctypes listing."""
+    listing = subprocess.run(
+        ["/bin/ps", "-A", "-o", "pid="], capture_output=True, text=True, check=True
+    )
+    return {int(line) for line in listing.stdout.split()}
 
 
 def _wait_for_ready(process: "subprocess.Popen[str]") -> None:
@@ -291,6 +299,25 @@ class TargetKeyTest(unittest.TestCase):
 
     def test_key_still_names_its_target_readably(self) -> None:
         self.assertTrue(fw.target_key("fseventsd").startswith("fseventsd-"))
+
+
+class ListPidsTest(unittest.TestCase):
+    def test_no_process_alive_throughout_the_call_is_missing(self) -> None:
+        # proc_listpids does not report that it ran out of room, so a truncated
+        # read is indistinguishable from a complete one - and a dropped second
+        # match reads as an unambiguous target, the single condition that
+        # permits a signal. Checked against ps rather than against this
+        # function's own bookkeeping, which could only agree with itself.
+        #
+        # ps on both sides of the call, intersected: a process listed before and
+        # after was alive throughout, so its absence from the listing is a real
+        # gap rather than a process that started or exited alongside it.
+        before = _ps_pids()
+        listed = set(fw.list_pids())
+        after = _ps_pids()
+        alive_throughout = before & after
+        self.assertGreater(len(alive_throughout), 50, "ps returned an implausible list")
+        self.assertEqual(alive_throughout - listed, set())
 
 
 class UnsafePathTest(unittest.TestCase):

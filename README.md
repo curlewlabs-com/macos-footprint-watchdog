@@ -64,7 +64,12 @@ how you change settings - it rewrites the job and reloads it.
 | --- | --- |
 | `sudo ./install.py --process P --ceiling C` | Install and load |
 | `./install.py --process P --ceiling C --verify` | Check the installed files still match this checkout |
-| `sudo ./install.py --process P --ceiling C --uninstall` | Unload and remove |
+| `sudo ./install.py --process P --ceiling C --uninstall` | Unload and remove that target |
+
+You can watch more than one process on a host: each target gets its own
+LaunchDaemon and its own cooldown, and they share the single installed
+executable. Uninstalling one target removes only its job, and keeps the
+executable as long as another job still points at it.
 
 `--verify` needs no privileges and exits non-zero on any drift: a plist someone
 edited in place, an executable that no longer matches the source, an install

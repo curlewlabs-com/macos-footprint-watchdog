@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import filecmp
 import io
 import os
 import plistlib
@@ -22,7 +23,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from typing import List, cast
+from typing import List, Optional, cast
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -112,6 +113,97 @@ class LogDestinationTest(unittest.TestCase):
         link = os.path.join(self.directory, "watchdog.log")
         os.symlink("/etc/hosts", link)
         self.assert_refused(link)
+
+
+class InstallExecutableTest(unittest.TestCase):
+    """launchd may exec the destination at any moment, including mid-install."""
+
+    def setUp(self) -> None:
+        self.directory = os.path.realpath(
+            tempfile.mkdtemp(prefix="footprint-watchdog-exe.")
+        )
+        self.addCleanup(subprocess.run, ["rm", "-rf", self.directory], check=False)
+        self.destination = os.path.join(self.directory, install.INSTALLED_NAME)
+        self.source = os.path.join(install.REPO_ROOT, install.SOURCE_NAME)
+
+    def test_the_installed_file_matches_the_source_and_is_executable(self) -> None:
+        install.install_executable(self.source, self.destination)
+        self.assertTrue(filecmp.cmp(self.source, self.destination, shallow=False))
+        self.assertTrue(os.stat(self.destination).st_mode & 0o111)
+
+    def test_a_failed_copy_leaves_the_previous_install_intact(self) -> None:
+        # The reason this is a rename rather than a copy onto the destination:
+        # copying truncates first, so a failure part-way leaves root executing a
+        # partial file every interval.
+        with open(self.destination, "w", encoding="utf-8") as stream:
+            stream.write("#!/usr/bin/python3\n# the previous install\n")
+        with self.assertRaises(OSError):
+            install.install_executable(
+                os.path.join(self.directory, "no-such-source"), self.destination
+            )
+        with open(self.destination, encoding="utf-8") as stream:
+            self.assertIn("the previous install", stream.read())
+        self.assertEqual(os.listdir(self.directory), [install.INSTALLED_NAME])
+
+
+class PlistsReferencingTest(unittest.TestCase):
+    """One executable serves every watched target."""
+
+    def setUp(self) -> None:
+        self.daemons = os.path.realpath(
+            tempfile.mkdtemp(prefix="footprint-watchdog-daemons.")
+        )
+        self.addCleanup(subprocess.run, ["rm", "-rf", self.daemons], check=False)
+        self.original_daemons = install.LAUNCH_DAEMONS
+        install.LAUNCH_DAEMONS = self.daemons
+        self.addCleanup(setattr, install, "LAUNCH_DAEMONS", self.original_daemons)
+        self.executable = "/usr/local/sbin/footprint-watchdog"
+
+    def write_job(self, process: str, executable: Optional[str] = None) -> str:
+        path = install.plist_path_for(process)
+        install.write_plist(
+            path,
+            install.build_plist(
+                process=process,
+                ceiling="2GiB",
+                interval=300,
+                executable=executable or self.executable,
+                log_path="/var/log/footprint-watchdog.log",
+                cooldown=None,
+                context_command=None,
+            ),
+        )
+        return path
+
+    def test_every_job_pointing_at_the_executable_is_reported(self) -> None:
+        first = self.write_job("fseventsd")
+        second = self.write_job("mds_stores")
+        self.assertEqual(
+            sorted(install.plists_referencing(self.executable)), sorted([first, second])
+        )
+
+    def test_removing_one_job_leaves_the_other_holding_the_executable(self) -> None:
+        # Uninstalling one target must not delete the binary its sibling runs.
+        first = self.write_job("fseventsd")
+        second = self.write_job("mds_stores")
+        os.unlink(first)
+        self.assertEqual(install.plists_referencing(self.executable), [second])
+
+    def test_the_last_job_going_away_orphans_the_executable(self) -> None:
+        os.unlink(self.write_job("fseventsd"))
+        self.assertEqual(install.plists_referencing(self.executable), [])
+
+    def test_a_job_running_a_different_executable_is_not_counted(self) -> None:
+        self.write_job("fseventsd", executable="/opt/elsewhere/footprint-watchdog")
+        self.assertEqual(install.plists_referencing(self.executable), [])
+
+    def test_an_unreadable_job_counts_as_a_reference(self) -> None:
+        # It might reference the executable, and guessing that it does not is
+        # the guess that deletes a binary something still runs.
+        path = install.plist_path_for("fseventsd")
+        with open(path, "wb") as stream:
+            stream.write(b"not a plist")
+        self.assertEqual(install.plists_referencing(self.executable), [path])
 
 
 class VerifyTest(unittest.TestCase):

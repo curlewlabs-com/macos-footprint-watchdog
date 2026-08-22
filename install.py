@@ -23,7 +23,7 @@ import stat
 import subprocess
 import sys
 import tempfile
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, cast
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -192,6 +192,58 @@ def write_plist(target_path: str, contents: Dict[str, object], mode: int = 0o644
     os.replace(temp_path, target_path)
 
 
+def install_executable(source: str, destination: str) -> None:
+    """Put the executable in place atomically.
+
+    Copying onto the destination would truncate it and refill it in place, and
+    launchd may exec that file at any moment - so a tick landing mid-copy runs a
+    partial file, and a copy that fails leaves a permanently broken install.
+    Writing a sibling and renaming means the destination is only ever the old
+    file or the new one.
+
+    No explicit chown, for the same reason write_plist has none: this runs as
+    root, so the temporary file is created root-owned. (Copying onto an existing
+    file would instead have preserved whatever owner it already had.)
+    """
+    handle, temp_path = tempfile.mkstemp(dir=os.path.dirname(destination))
+    try:
+        with os.fdopen(handle, "wb") as target:
+            with open(source, "rb") as stream:
+                shutil.copyfileobj(stream, target)
+        os.chmod(temp_path, 0o755)
+    except OSError:
+        os.unlink(temp_path)
+        raise
+    os.replace(temp_path, destination)
+
+
+def plists_referencing(executable: str) -> List[str]:
+    """Installed job files whose ProgramArguments start with this executable."""
+    referencing: List[str] = []
+    try:
+        names = sorted(os.listdir(LAUNCH_DAEMONS))
+    except OSError:
+        return referencing
+    for name in names:
+        if not name.startswith(LABEL_PREFIX) or not name.endswith(".plist"):
+            continue
+        path = os.path.join(LAUNCH_DAEMONS, name)
+        try:
+            with open(path, "rb") as stream:
+                contents = plistlib.load(stream)
+        except (OSError, ValueError):
+            # An unreadable job file might still reference the executable, so
+            # counting it as "no reference" would be the unsafe assumption.
+            referencing.append(path)
+            continue
+        arguments = cast(object, contents.get("ProgramArguments"))
+        if not isinstance(arguments, list) or not arguments:
+            continue
+        if str(cast(List[object], arguments)[0]) == executable:
+            referencing.append(path)
+    return referencing
+
+
 def launchctl(arguments: List[str], check: bool) -> int:
     result = subprocess.run(["/bin/launchctl"] + arguments, capture_output=True, text=True, timeout=120)
     if result.returncode != 0 and check:
@@ -207,10 +259,7 @@ def do_install(args: argparse.Namespace) -> int:
     prepare_install_dir(prefix)
 
     executable = os.path.join(prefix, INSTALLED_NAME)
-    source = os.path.join(REPO_ROOT, SOURCE_NAME)
-    shutil.copyfile(source, executable)
-    os.chmod(executable, 0o755)
-    os.chown(executable, 0, 0)
+    install_executable(os.path.join(REPO_ROOT, SOURCE_NAME), executable)
     print("installed %s" % executable)
 
     label = label_for(str(args.process))
@@ -322,8 +371,16 @@ def do_uninstall(args: argparse.Namespace) -> int:
     if os.path.exists(plist_path):
         os.unlink(plist_path)
         print("removed %s" % plist_path)
+    # One executable serves every watched target, so removing it because one
+    # target went away would break the siblings that still point at it.
     executable = os.path.join(str(args.prefix), INSTALLED_NAME)
-    if os.path.exists(executable):
+    still_used = plists_referencing(executable)
+    if still_used:
+        print(
+            "kept %s - still referenced by %s"
+            % (executable, ", ".join(os.path.basename(p) for p in still_used))
+        )
+    elif os.path.exists(executable):
         os.unlink(executable)
         print("removed %s" % executable)
     # The state directory is left behind: it holds the cooldown stamps that

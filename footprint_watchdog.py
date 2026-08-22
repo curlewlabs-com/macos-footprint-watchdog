@@ -69,6 +69,9 @@ _PROC_PIDPATHINFO_MAXSIZE = 4096
 # the footprint and the process start time, so asking for the oldest one keeps
 # the struct unambiguous across OS versions.
 _RUSAGE_INFO_V0 = 0
+# Doubling from the kernel's own count, so reaching the last one would need the
+# process table to grow past several times its reported size mid-call.
+_LIST_PIDS_ATTEMPTS = 6
 
 
 class _RUsageInfoV0(ctypes.Structure):
@@ -226,20 +229,34 @@ def read_sample(pid: int, path: str) -> Optional[Sample]:
 
 
 def list_pids() -> List[int]:
-    needed: int = _LIB.proc_listpids(_PROC_ALL_PIDS, 0, None, 0)
-    if needed <= 0:
-        raise OSError(ctypes.get_errno(), "proc_listpids sizing failed")
-    # Processes can appear between the sizing call and the read, so ask for
-    # headroom rather than exactly what the kernel just reported.
-    capacity = needed // ctypes.sizeof(ctypes.c_int32) + 64
-    buffer = (ctypes.c_int32 * capacity)()
-    written: int = _LIB.proc_listpids(
-        _PROC_ALL_PIDS, 0, ctypes.byref(buffer), ctypes.sizeof(buffer)
-    )
-    if written <= 0:
-        raise OSError(ctypes.get_errno(), "proc_listpids read failed")
-    count = written // ctypes.sizeof(ctypes.c_int32)
-    return [int(buffer[i]) for i in range(count) if buffer[i] > 0]
+    """Every pid on the host, or an error - never a partial list.
+
+    proc_listpids fills the buffer it is given and reports how many bytes it
+    wrote; it does not say it ran out of room. A read that exactly fills the
+    buffer is therefore indistinguishable from a truncated one, so it is retried
+    with a larger buffer until one comes back short. Silently returning a subset
+    would be worse than failing: a missing process reads as "target absent", and
+    a missing SECOND match reads as an unambiguous target - which is the one
+    condition that permits a signal.
+    """
+    capacity = 0
+    for _ in range(_LIST_PIDS_ATTEMPTS):
+        needed: int = _LIB.proc_listpids(_PROC_ALL_PIDS, 0, None, 0)
+        if needed <= 0:
+            raise OSError(ctypes.get_errno(), "proc_listpids sizing failed")
+        # Headroom over the kernel's own answer, since processes can appear
+        # between the sizing call and the read.
+        capacity = max(capacity * 2, needed // ctypes.sizeof(ctypes.c_int32) + 64)
+        buffer = (ctypes.c_int32 * capacity)()
+        written: int = _LIB.proc_listpids(
+            _PROC_ALL_PIDS, 0, ctypes.byref(buffer), ctypes.sizeof(buffer)
+        )
+        if written <= 0:
+            raise OSError(ctypes.get_errno(), "proc_listpids read failed")
+        if written < ctypes.sizeof(buffer):
+            count = written // ctypes.sizeof(ctypes.c_int32)
+            return [int(buffer[i]) for i in range(count) if buffer[i] > 0]
+    raise OSError("proc_listpids filled every buffer up to %d entries" % capacity)
 
 
 def pid_path(pid: int) -> Optional[str]:
@@ -763,12 +780,26 @@ def run_tick(
     if dry_run:
         return EXIT_OK
 
-    # Re-resolve immediately before signalling. Between the measurement above and
-    # this line the target can exit and the kernel can hand its pid to something
-    # else; signalling a recycled pid as root is the worst outcome this tool has,
-    # so the identity is re-proven rather than assumed to have held.
-    confirmed = [p for p, resolved in find_targets(spec) if p == sample.pid and resolved == sample.path]
-    if not confirmed:
+    # Re-resolve immediately before signalling, and require the same singleton
+    # the tick required before measuring. Between the measurement above and this
+    # line the target can exit and the kernel can hand its pid to something else
+    # - signalling a recycled pid as root is the worst outcome this tool has - and
+    # a second instance can appear, which is the ambiguity the tick already
+    # refused to act under. Re-checking only that the measured pid survived
+    # would uphold the first of those and quietly drop the second.
+    current = find_targets(spec)
+    if current != [(sample.pid, sample.path)]:
+        if any(pid == sample.pid for pid, _ in current):
+            emit(
+                {
+                    "event": "target_ambiguous",
+                    "process": spec,
+                    "pids": [pid for pid, _ in current],
+                    "reason": "a second process appeared after measuring; refusing to signal",
+                },
+                out,
+            )
+            return EXIT_TARGET_AMBIGUOUS
         emit({"event": "target_changed_before_signal", "process": spec, "pid": sample.pid}, out)
         return EXIT_TARGET_ABSENT
 

@@ -151,6 +151,21 @@ while the link in `/tmp` stays replaceable by anyone, and it is the written path
 that root actually traverses. A path that does not exist yet is judged by the
 nearest ancestor that does, since that is what decides who can create it.
 
+## Installing over a running watchdog
+
+launchd can exec the installed file at any moment, including while an install is
+overwriting it, so the executable is written to a sibling and renamed into place
+rather than copied onto the destination. A copy truncates first: a tick landing
+mid-copy would run a partial file, and a copy that failed part-way would leave a
+permanently broken install. With a rename, the destination is only ever the old
+file or the new one.
+
+One executable serves every watched target - the per-target state is the job
+file, the lock, and the cooldown stamp. So uninstalling a target removes its job
+file, and removes the executable only once no remaining job references it. A job
+file that cannot be parsed counts as a reference, since guessing that it does
+not is the guess that deletes a binary something still runs.
+
 ## The restart, and proving it worked
 
 The signal is `TERM` by default; `KILL` is available but is not the default,
