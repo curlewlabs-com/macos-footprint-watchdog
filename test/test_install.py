@@ -78,6 +78,42 @@ class GeneratedArgumentsTest(unittest.TestCase):
         self.assertEqual(self.parse_generated()[0], "/usr/local/sbin/footprint-watchdog")
 
 
+class LogDestinationTest(unittest.TestCase):
+    """launchd opens this path as root on every run."""
+
+    def setUp(self) -> None:
+        self.directory = os.path.realpath(
+            tempfile.mkdtemp(prefix="footprint-watchdog-log.")
+        )
+        self.addCleanup(subprocess.run, ["rm", "-rf", self.directory], check=False)
+
+    def assert_refused(self, log_path: str) -> None:
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                install.require_root_only_log(log_path)
+
+    def test_a_directory_a_non_root_account_owns_is_refused(self) -> None:
+        # The spelling this exists for: any account that can write the directory
+        # can pre-place a symlink and choose a file for root to append to.
+        self.assert_refused(os.path.join(self.directory, "watchdog.log"))
+
+    def test_a_missing_directory_is_refused(self) -> None:
+        # launchd cannot create intermediate directories, so it would discard
+        # every record while the install reported success.
+        self.assert_refused("/var/log/no-such-dir-here/watchdog.log")
+
+    def test_a_non_regular_existing_log_is_refused(self) -> None:
+        # Root blocks writing to an unread fifo, taking the watchdog with it.
+        fifo = os.path.join(self.directory, "watchdog.log")
+        os.mkfifo(fifo)
+        self.assert_refused(fifo)
+
+    def test_a_symlink_is_refused(self) -> None:
+        link = os.path.join(self.directory, "watchdog.log")
+        os.symlink("/etc/hosts", link)
+        self.assert_refused(link)
+
+
 class VerifyTest(unittest.TestCase):
     """`--verify` has to fail on drift, or it is worse than not existing."""
 

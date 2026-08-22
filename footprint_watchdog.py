@@ -44,7 +44,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from typing import Callable, Dict, List, Optional, Sequence, TextIO, Tuple, cast
+from typing import Callable, Dict, List, Optional, Sequence, Set, TextIO, Tuple, cast
 
 # Exit codes are the operator's interface: launchd records them, and each names
 # a distinct state so a log line is not needed to tell them apart.
@@ -173,6 +173,26 @@ def parse_size(text: str) -> int:
     return value
 
 
+def positive_int(text: str) -> int:
+    """An argparse type for a duration that must be greater than zero.
+
+    Zero or negative disables the thing silently rather than erroring. A
+    non-positive cooldown makes `cooldown_remaining` return 0.0 on every tick,
+    which removes the restart-loop guard without saying so.
+    """
+    value = int(text)
+    if value <= 0:
+        raise argparse.ArgumentTypeError("must be greater than zero, got %r" % text)
+    return value
+
+
+def positive_float(text: str) -> float:
+    value = float(text)
+    if value <= 0:
+        raise argparse.ArgumentTypeError("must be greater than zero, got %r" % text)
+    return value
+
+
 def _mach_timebase() -> Tuple[int, int]:
     info = _MachTimebaseInfo()
     if _LIB.mach_timebase_info(ctypes.byref(info)) != 0:
@@ -261,33 +281,54 @@ def target_key(spec: str) -> str:
     return "%s-%s" % (readable or "target", digest)
 
 
-def unsafe_path_owners(path: str) -> List[str]:
-    """Components of `path` that an account other than root could replace.
-
-    Every directory on the way to a file root executes, or writes state into,
-    has to be root-owned and not writable by group or other. Checking only the
-    leaf's write bits is not enough twice over: a leaf owned by a non-root
-    account is writable by that account whatever its mode says, and a writable
-    ancestor lets that account swap the whole directory out from under the leaf.
+def _ancestor_chain(path: str) -> List[str]:
+    """`path` and every ancestor, starting at the nearest one that exists.
 
     A path that does not exist yet is governed by the nearest ancestor that
     does, since that is what decides who can create it.
     """
-    problems: List[str] = []
-    current = os.path.realpath(path)
-    while not os.path.exists(current):
+    current = path
+    while not os.path.lexists(current):
         parent = os.path.dirname(current)
         if parent == current:
-            return problems
+            return []
         current = parent
+    chain: List[str] = []
     while True:
-        info = os.stat(current)
-        if info.st_uid != 0 or (info.st_mode & 0o022):
-            problems.append(current)
+        chain.append(current)
         parent = os.path.dirname(current)
         if parent == current:
-            return problems
+            return chain
         current = parent
+
+
+def unsafe_path_owners(path: str) -> List[str]:
+    """Components of `path` that an account other than root could replace.
+
+    Every directory on the way to a file root executes, or writes into, has to
+    be root-owned and not writable by group or other. Checking only the leaf's
+    write bits is not enough twice over: a leaf owned by a non-root account is
+    writable by that account whatever its mode says, and a writable ancestor
+    lets that account swap the whole directory out from under the leaf.
+
+    Both the path as written and the path as resolved are audited, with lstat so
+    a symlink is judged as itself rather than as its target. Resolving first and
+    auditing only the result would clear `/tmp/link-to-a-root-owned-dir`, whose
+    resolved form is beyond reproach while the link in /tmp stays replaceable by
+    anyone - and it is the written path that root actually traverses.
+    """
+    absolute = os.path.abspath(path)
+    problems: List[str] = []
+    seen: Set[str] = set()
+    for chain in (_ancestor_chain(absolute), _ancestor_chain(os.path.realpath(absolute))):
+        for component in chain:
+            if component in seen:
+                continue
+            seen.add(component)
+            info = os.lstat(component)
+            if info.st_uid != 0 or (info.st_mode & 0o022):
+                problems.append(component)
+    return problems
 
 
 def find_targets(spec: str) -> List[Tuple[int, str]]:
@@ -484,14 +525,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--cooldown",
-        type=int,
+        type=positive_int,
         default=DEFAULT_COOLDOWN_SECONDS,
         metavar="SECONDS",
         help="Minimum seconds between restarts (default: %(default)s).",
     )
     parser.add_argument(
         "--respawn-timeout",
-        type=float,
+        type=positive_float,
         default=DEFAULT_RESPAWN_TIMEOUT_SECONDS,
         metavar="SECONDS",
         help="How long to wait for a replacement pid (default: %(default)s).",

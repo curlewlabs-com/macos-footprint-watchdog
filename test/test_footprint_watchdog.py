@@ -21,7 +21,7 @@ import sys
 import tempfile
 import time
 import unittest
-from typing import Dict, List, Optional, cast
+from typing import Dict, List, Optional, Tuple, cast
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -30,15 +30,33 @@ import footprint_watchdog as fw  # noqa: E402
 # Long enough that a target outlives the case driving it, short enough that a
 # leaked process disappears on its own rather than lingering on a dev machine.
 TARGET_LIFETIME_SECONDS = 90
-# The respawn wait a supervisor-backed case allows. A shell loop re-execs in
-# milliseconds; this is a backstop against a hang, not a tuned delay, so it is
-# far above the expected value and still short enough to fail a run fast.
-TEST_RESPAWN_TIMEOUT_SECONDS = 15.0
-# How long to wait for a target to report that its allocation is resident.
-READY_TIMEOUT_SECONDS = 30.0
+
+# Practical INFINITE for this runner: every per-wait backstop here uses it, and
+# none of them is meant to be reached. A ceiling picked to "fail fast" only
+# converts runner contention into a flake, since a true hang fails the run at
+# any ceiling while a healthy run under load can exceed a tight one.
+#
+# Sized off this runner rather than copied: the waits it bounds are a process
+# spawn plus a 64 MiB memset, and a shell loop re-exec. Measured, all of the
+# suite's healthy waits together account for under three seconds, so 60s is
+# roughly three orders of magnitude of headroom on the slowest of them - and
+# this suite runs one job per OS image, without the parallel contention that
+# forces some runners higher.
+INFINITE = 60.0
+
+# The deliberate opposite, and not a backstop: a handful of cases assert what
+# happens when the respawn wait EXPIRES, so for those the expiry is the
+# behaviour under test rather than a hang guard. Short is the safe direction
+# here - load can only make an expiry that is already expected arrive more
+# surely - which is exactly why it must never be reused as a ceiling.
+EXPIRING_RESPAWN_SECONDS = 1.0
 
 _build_dir = ""
 _target_bin = ""
+
+# A pid that names no live process, for cases about what the old target's
+# absence means. Above the default pid_max so it cannot collide with a real one.
+_DEAD_PID = 999999
 
 
 def setUpModule() -> None:
@@ -63,14 +81,14 @@ def tearDownModule() -> None:
 def _wait_for_ready(process: "subprocess.Popen[str]") -> None:
     """Block until the target reports its allocation is dirtied and resident."""
     assert process.stderr is not None
-    deadline = time.time() + READY_TIMEOUT_SECONDS
+    deadline = time.time() + INFINITE
     while time.time() < deadline:
         line = process.stderr.readline()
         if "ready" in line:
             return
         if process.poll() is not None:
             raise AssertionError("target exited before signalling ready")
-    raise AssertionError("target did not signal ready within %.0fs" % READY_TIMEOUT_SECONDS)
+    raise AssertionError("target did not signal ready within %.0fs" % INFINITE)
 
 
 class TargetProcess:
@@ -81,13 +99,7 @@ class TargetProcess:
     replaced?" assertion meaningful.
     """
 
-    def __init__(
-        self,
-        mib: int,
-        respawn_mib: Optional[int] = None,
-        extra_instances: int = 0,
-    ) -> None:
-        self.extra: List["TargetProcess"] = []
+    def __init__(self, mib: int, respawn_mib: Optional[int] = None) -> None:
         self.respawning = respawn_mib is not None
         if self.respawning:
             script = '"$1" "$2" "$4"; while :; do "$1" "$3" "$4"; done'
@@ -112,22 +124,18 @@ class TargetProcess:
             start_new_session=True,
         )
         _wait_for_ready(self.process)
-        for _ in range(extra_instances):
-            self.extra.append(TargetProcess(mib=1))
 
     def pids(self) -> List[int]:
         return [pid for pid, _ in fw.find_targets(_target_bin)]
 
     def close(self) -> None:
-        for extra in self.extra:
-            extra.close()
         try:
             os.killpg(os.getpgid(self.process.pid), signal.SIGKILL)
         except OSError:
             pass
         if self.process.stderr is not None:
             self.process.stderr.close()
-        self.process.wait(timeout=10)
+        self.process.wait(timeout=INFINITE)
 
 
 class ParseSizeTest(unittest.TestCase):
@@ -234,6 +242,35 @@ class FindTargetsTest(unittest.TestCase):
         self.assertEqual([pid for pid, _ in fw.find_targets("/sbin/launchd") if pid == 1], [])
 
 
+class TimingArgumentTest(unittest.TestCase):
+    """Durations that silently disable a guard when they are not positive."""
+
+    def test_a_non_positive_cooldown_is_rejected(self) -> None:
+        # cooldown_remaining returns 0.0 for any non-positive window, so this
+        # would turn the restart-loop guard off without reporting anything.
+        self.assertEqual(fw.cooldown_remaining(1000.0, 1000.0, -1.0), 0.0)
+        for bad in ("0", "-1"):
+            with self.assertRaises(SystemExit):
+                fw.build_parser().parse_args(
+                    ["--process", "x", "--ceiling", "1GiB", "--cooldown", bad]
+                )
+
+    def test_a_non_positive_respawn_timeout_is_rejected(self) -> None:
+        for bad in ("0", "-0.5"):
+            with self.assertRaises(SystemExit):
+                fw.build_parser().parse_args(
+                    ["--process", "x", "--ceiling", "1GiB", "--respawn-timeout", bad]
+                )
+
+    def test_positive_values_still_parse(self) -> None:
+        parsed = fw.build_parser().parse_args(
+            ["--process", "x", "--ceiling", "1GiB", "--cooldown", "60",
+             "--respawn-timeout", "0.5"]
+        )
+        self.assertEqual(parsed.cooldown, 60)
+        self.assertEqual(parsed.respawn_timeout, 0.5)
+
+
 class TargetKeyTest(unittest.TestCase):
     def test_specs_that_sanitize_alike_do_not_collide(self) -> None:
         # Both of these become "tmp_a_b" if the key is just a character
@@ -288,6 +325,14 @@ class UnsafePathTest(unittest.TestCase):
         os.chmod(parent, 0o777)
         self.assertIn(parent, fw.unsafe_path_owners(leaf))
 
+    def test_a_symlink_into_a_safe_tree_is_still_unsafe(self) -> None:
+        # The shape that resolving-before-auditing clears: the resolved path is
+        # beyond reproach, while the link root actually traverses sits in a
+        # directory anyone can write, so it can be repointed at will.
+        link = os.path.join(self.directory, "link-to-root-dir")
+        os.symlink("/var/db", link)
+        self.assertIn(link, fw.unsafe_path_owners(link))
+
     def test_a_path_that_does_not_exist_is_judged_by_its_parent(self) -> None:
         # Nothing has been created yet at install time; what matters is who can
         # create it.
@@ -315,6 +360,58 @@ class ReadSampleTest(unittest.TestCase):
         self.assertIsNone(fw.read_sample(999999, "/nonexistent"))
 
 
+class WaitForReplacementTest(unittest.TestCase):
+    """What counts as a replacement, and what only looks like one."""
+
+    def wait(self, old_pid: int, timeout: float) -> Tuple[Optional[Tuple[int, str]], str]:
+        return fw.wait_for_replacement(
+            _target_bin, old_pid, timeout, time.time, time.sleep
+        )
+
+    def test_one_new_process_with_the_old_one_gone_is_a_replacement(self) -> None:
+        target = TargetProcess(mib=1)
+        self.addCleanup(target.close)
+        replacement, reason = self.wait(old_pid=_DEAD_PID, timeout=INFINITE)
+        self.assertEqual(reason, "replaced")
+        assert replacement is not None
+        self.assertEqual(replacement[0], target.process.pid)
+
+    def test_a_still_running_original_is_not_a_replacement(self) -> None:
+        # A target that ignores TERM can still be running when its supervisor
+        # starts a second instance. Accepting the fresh one would report
+        # recovery while the runaway is alive and still over the ceiling.
+        original = TargetProcess(mib=1)
+        self.addCleanup(original.close)
+        newer = TargetProcess(mib=1)
+        self.addCleanup(newer.close)
+        replacement, reason = self.wait(
+            old_pid=original.process.pid, timeout=EXPIRING_RESPAWN_SECONDS
+        )
+        self.assertIsNone(replacement)
+        self.assertIn("still running", reason)
+
+    def test_several_candidates_are_not_a_replacement(self) -> None:
+        # With more than one match there is no way to say which the ceiling now
+        # describes - the same reason a tick refuses an ambiguous target before
+        # it signals anything.
+        first = TargetProcess(mib=1)
+        self.addCleanup(first.close)
+        second = TargetProcess(mib=1)
+        self.addCleanup(second.close)
+        replacement, reason = self.wait(
+            old_pid=_DEAD_PID, timeout=EXPIRING_RESPAWN_SECONDS
+        )
+        self.assertIsNone(replacement)
+        self.assertIn("several", reason)
+
+    def test_nothing_matching_is_reported_as_such(self) -> None:
+        replacement, reason = self.wait(
+            old_pid=_DEAD_PID, timeout=EXPIRING_RESPAWN_SECONDS
+        )
+        self.assertIsNone(replacement)
+        self.assertIn("nothing matches", reason)
+
+
 class RunTickTest(unittest.TestCase):
     def setUp(self) -> None:
         self.directory = tempfile.mkdtemp(prefix="footprint-watchdog-tick.")
@@ -330,12 +427,13 @@ class RunTickTest(unittest.TestCase):
         dry_run: bool = False,
         cooldown_seconds: float = 3600.0,
         state_path: Optional[str] = None,
+        respawn_timeout: float = INFINITE,
     ) -> int:
         return fw.run_tick(
             spec=_target_bin,
             ceiling=ceiling,
             cooldown_seconds=cooldown_seconds,
-            respawn_timeout=TEST_RESPAWN_TIMEOUT_SECONDS,
+            respawn_timeout=respawn_timeout,
             signal_name="TERM",
             state_path=self.state_path if state_path is None else state_path,
             context_command=None,
@@ -424,21 +522,16 @@ class RunTickTest(unittest.TestCase):
         self.assertEqual(events, ["ceiling_crossed", "cooldown_stamp_failed"])
         self.assertEqual(target.pids(), before)
 
-    def test_a_surviving_original_is_not_reported_as_recovery(self) -> None:
-        # A target that does not die on TERM, while something starts a second
-        # instance, must not read as recovered: the runaway is still there, and
-        # measuring the fresh process instead would report success.
-        target = TargetProcess(mib=64, extra_instances=1)
-        self.addCleanup(target.close)
-        self.assertEqual(self.tick(ceiling=32 * 1024 ** 2), fw.EXIT_TARGET_AMBIGUOUS)
-
     def test_failed_respawn_still_records_the_cooldown_stamp(self) -> None:
         # Without a supervisor nothing replaces the target. The stamp must land
         # anyway: a failure that leaves the cooldown unset lets the next tick
         # signal again, which is the restart loop this is built to avoid.
         target = TargetProcess(mib=64)
         self.addCleanup(target.close)
-        self.assertEqual(self.tick(ceiling=32 * 1024 ** 2), fw.EXIT_RESPAWN_FAILED)
+        self.assertEqual(
+            self.tick(ceiling=32 * 1024 ** 2, respawn_timeout=EXPIRING_RESPAWN_SECONDS),
+            fw.EXIT_RESPAWN_FAILED,
+        )
         events = [record["event"] for record in self.records()]
         self.assertEqual(events, ["ceiling_crossed", "recovery_unconfirmed"])
         self.assertIn("last_restart_epoch", fw.read_state(self.state_path))

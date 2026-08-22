@@ -19,6 +19,7 @@ import filecmp
 import os
 import plistlib
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -123,18 +124,33 @@ def require_root_only_log(log_path: str) -> None:
     to. The directory has to be root-only, and an existing log has to be a plain
     root-owned file rather than a link.
     """
-    require_root_only_path(os.path.dirname(log_path) or "/", "write a log into")
-    if os.path.islink(log_path):
+    directory = os.path.dirname(log_path) or "/"
+    if not os.path.isdir(directory):
+        sys.stderr.write(
+            "refusing to log to %s: %s is not an existing directory, so launchd "
+            "would silently discard every record\n" % (log_path, directory)
+        )
+        raise SystemExit(2)
+    require_root_only_path(directory, "write a log into")
+    if not os.path.lexists(log_path):
+        return
+    info = os.lstat(log_path)
+    if stat.S_ISLNK(info.st_mode):
         sys.stderr.write("refusing to log to %s: it is a symlink\n" % log_path)
         raise SystemExit(2)
-    if os.path.exists(log_path):
-        info = os.stat(log_path)
-        if info.st_uid != 0 or (info.st_mode & 0o022):
-            sys.stderr.write(
-                "refusing to log to %s: not root-owned, or writable by a non-root "
-                "account\n" % log_path
-            )
-            raise SystemExit(2)
+    if not stat.S_ISREG(info.st_mode):
+        # A fifo or device here is not a redirect but it is still not a log:
+        # root blocks on an unread fifo, taking the watchdog down with it.
+        sys.stderr.write(
+            "refusing to log to %s: not a regular file\n" % log_path
+        )
+        raise SystemExit(2)
+    if info.st_uid != 0 or (info.st_mode & 0o022):
+        sys.stderr.write(
+            "refusing to log to %s: not root-owned, or writable by a non-root "
+            "account\n" % log_path
+        )
+        raise SystemExit(2)
 
 
 def require_root_only_path(path: str, action: str) -> None:
@@ -324,11 +340,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--ceiling", required=True, help="Restart above this footprint (e.g. 2GiB).")
     parser.add_argument(
         "--interval",
-        type=int,
+        type=fw.positive_int,
         default=DEFAULT_INTERVAL_SECONDS,
         help="Seconds between checks (default: %(default)s).",
     )
-    parser.add_argument("--cooldown", type=int, help="Minimum seconds between restarts.")
+    parser.add_argument(
+        "--cooldown", type=fw.positive_int, help="Minimum seconds between restarts."
+    )
     parser.add_argument("--context-command", help="Also count these processes in the crossing record.")
     # Exposed here, rather than left to a hand-edited plist, because --verify
     # reports a hand-edited plist as drift: every knob a real install needs has

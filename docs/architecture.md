@@ -143,9 +143,13 @@ For the state directory the concrete attack is a symlink pre-placed at the lock
 or state path, which would redirect a root write; for the executable and the
 plist it is simply substituting what root runs every interval.
 
-`unsafe_path_owners` walks from the resolved path up to the root and reports
-every component that fails either test. A path that does not exist yet is judged
-by the nearest ancestor that does, since that is what decides who can create it.
+`unsafe_path_owners` reports every component that fails either test, walking the
+path **as written** and the path **as resolved**, with `lstat` so a symlink is
+judged as itself rather than as its target. Auditing only the resolved form
+would clear `/tmp/link-to-a-root-owned-dir`: the resolution is beyond reproach
+while the link in `/tmp` stays replaceable by anyone, and it is the written path
+that root actually traverses. A path that does not exist yet is judged by the
+nearest ancestor that does, since that is what decides who can create it.
 
 ## The restart, and proving it worked
 
