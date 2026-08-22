@@ -115,6 +115,36 @@ class LogDestinationTest(unittest.TestCase):
         self.assert_refused(link)
 
 
+class CeilingValidationTest(unittest.TestCase):
+    def test_an_unparseable_ceiling_fails_at_parse_time(self) -> None:
+        # At parse time specifically: rejected there, nothing downstream runs,
+        # so no filesystem write can precede the error. Left to the watchdog's
+        # first tick instead, the install reports success and leaves a job that
+        # can only fail, once an interval, forever.
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                install.build_parser().parse_args(
+                    ["--process", "fseventsd", "--ceiling", "potatoes"]
+                )
+
+    def test_the_validator_rejects_what_the_watchdog_would_reject(self) -> None:
+        for bad in ("potatoes", "", "-1", "0", "1e9"):
+            with self.assertRaises(argparse.ArgumentTypeError, msg=bad):
+                install.ceiling_string(bad)
+
+    def test_a_valid_ceiling_still_parses(self) -> None:
+        parsed = install.build_parser().parse_args(
+            ["--process", "fseventsd", "--ceiling", "2GiB"]
+        )
+        self.assertEqual(parsed.ceiling, "2GiB")
+
+    def test_the_operator_spelling_is_kept_verbatim(self) -> None:
+        # The plist carries what was written, so validation must not normalise
+        # it into some other spelling behind the operator's back.
+        self.assertEqual(install.ceiling_string("2GiB"), "2GiB")
+        self.assertEqual(install.ceiling_string("512MB"), "512MB")
+
+
 class InstallExecutableTest(unittest.TestCase):
     """launchd may exec the destination at any moment, including mid-install."""
 
@@ -283,6 +313,24 @@ class VerifyTest(unittest.TestCase):
         with open(os.path.join(self.prefix, install.INSTALLED_NAME), "a", encoding="utf-8") as stream:
             stream.write("\n# local edit\n")
         self.assertIn("executable_content_differs", self.codes())
+
+    def test_an_unreadable_executable_is_drift_not_a_traceback(self) -> None:
+        # Config management runs --verify; a raise here is a traceback nobody
+        # can act on where a drift record was promised.
+        os.chmod(os.path.join(self.prefix, install.INSTALLED_NAME), 0o000)
+        self.assertIn("executable_unreadable", self.codes())
+
+    def test_a_corrupt_plist_is_drift_not_a_traceback(self) -> None:
+        with open(install.plist_path_for("fseventsd"), "wb") as stream:
+            stream.write(b"not a plist")
+        self.assertIn("launchdaemon_unreadable", self.codes())
+
+    def test_a_malformed_xml_plist_is_drift_not_a_traceback(self) -> None:
+        # Malformed XML surfaces the parser's own ExpatError, which is not a
+        # ValueError - so catching ValueError alone would let this one escape.
+        with open(install.plist_path_for("fseventsd"), "wb") as stream:
+            stream.write(b'<?xml version="1.0"?><plist><dict><key>a</key>')
+        self.assertIn("launchdaemon_unreadable", self.codes())
 
     def test_a_missing_install_is_drift(self) -> None:
         os.unlink(os.path.join(self.prefix, install.INSTALLED_NAME))

@@ -24,6 +24,7 @@ import subprocess
 import sys
 import tempfile
 from typing import Dict, List, Optional, Tuple, cast
+from xml.parsers.expat import ExpatError
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -41,6 +42,26 @@ LAUNCH_DAEMONS = "/Library/LaunchDaemons"
 # time because a missing Command Line Tools install makes /usr/bin/python3 a stub
 # that opens a GUI prompt - harmless in a terminal, a silently dead daemon here.
 INTERPRETER = "/usr/bin/python3"
+# What reading a job file can raise. ExpatError is here because it is NOT a
+# ValueError: plistlib raises InvalidFileException (which is) for a binary plist
+# it cannot make sense of, but malformed XML surfaces the parser's own error
+# straight through, so catching ValueError alone lets that one escape.
+PLIST_READ_ERRORS = (OSError, ValueError, ExpatError)
+
+
+def ceiling_string(text: str) -> str:
+    """Validate a ceiling at parse time, and keep the operator's spelling.
+
+    The plist carries the string the operator wrote, so this returns it
+    unchanged - but an unparseable one has to fail here rather than at the
+    watchdog's first tick. Otherwise the install reports success and leaves the
+    host with a job that can only fail, every interval, forever.
+    """
+    try:
+        fw.parse_size(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc))
+    return text
 
 
 def label_for(process: str) -> str:
@@ -231,7 +252,7 @@ def plists_referencing(executable: str) -> List[str]:
         try:
             with open(path, "rb") as stream:
                 contents = plistlib.load(stream)
-        except (OSError, ValueError):
+        except PLIST_READ_ERRORS:
             # An unreadable job file might still reference the executable, so
             # counting it as "no reference" would be the unsafe assumption.
             referencing.append(path)
@@ -311,7 +332,16 @@ def verify_problems(args: argparse.Namespace) -> List[Tuple[str, str]]:
     if not os.path.exists(executable):
         problems.append(("executable_missing", executable))
     else:
-        if not filecmp.cmp(os.path.join(REPO_ROOT, SOURCE_NAME), executable, shallow=False):
+        try:
+            matches = filecmp.cmp(
+                os.path.join(REPO_ROOT, SOURCE_NAME), executable, shallow=False
+            )
+        except OSError as exc:
+            # A verifier that raises where it promised a drift record turns a
+            # config-management check into a traceback nobody can act on.
+            problems.append(("executable_unreadable", "%s (%s)" % (executable, exc)))
+            matches = True
+        if not matches:
             problems.append(("executable_content_differs", executable))
         info = os.stat(executable)
         if info.st_uid != 0:
@@ -336,8 +366,12 @@ def verify_problems(args: argparse.Namespace) -> List[Tuple[str, str]]:
             problems.append(("launchdaemon_not_root_owned", plist_path))
         if info.st_mode & 0o022:
             problems.append(("launchdaemon_writable_by_non_root", plist_path))
-        with open(plist_path, "rb") as stream:
-            installed = plistlib.load(stream)
+        try:
+            with open(plist_path, "rb") as stream:
+                installed = cast(object, plistlib.load(stream))
+        except PLIST_READ_ERRORS as exc:
+            problems.append(("launchdaemon_unreadable", "%s (%s)" % (plist_path, exc)))
+            return problems
         expected = build_plist(
             process=str(args.process),
             ceiling=str(args.ceiling),
@@ -388,13 +422,18 @@ def do_uninstall(args: argparse.Namespace) -> int:
     return 0
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="install.py",
         description="Install, verify, or remove the footprint-watchdog LaunchDaemon.",
     )
     parser.add_argument("--process", required=True, help="Target executable name or absolute path.")
-    parser.add_argument("--ceiling", required=True, help="Restart above this footprint (e.g. 2GiB).")
+    parser.add_argument(
+        "--ceiling",
+        required=True,
+        type=ceiling_string,
+        help="Restart above this footprint (e.g. 2GiB).",
+    )
     parser.add_argument(
         "--interval",
         type=fw.positive_int,
@@ -418,7 +457,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--verify", action="store_true", help="Check installed files against the sources.")
     group.add_argument("--uninstall", action="store_true", help="Unload and remove.")
-    args = parser.parse_args(argv)
+    return parser
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    args = build_parser().parse_args(argv)
 
     if args.verify:
         return do_verify(args)
