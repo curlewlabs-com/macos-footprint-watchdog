@@ -90,10 +90,12 @@ class VerifyTest(unittest.TestCase):
         self.original_daemons = install.LAUNCH_DAEMONS
         install.LAUNCH_DAEMONS = self.daemons
 
-        shutil.copyfile(
-            os.path.join(install.REPO_ROOT, install.SOURCE_NAME),
-            os.path.join(self.prefix, install.INSTALLED_NAME),
-        )
+        installed = os.path.join(self.prefix, install.INSTALLED_NAME)
+        shutil.copyfile(os.path.join(install.REPO_ROOT, install.SOURCE_NAME), installed)
+        # copyfile does not carry the mode over, and do_install sets 0755. Match
+        # a real install here, or the exec-bit case below would assert against a
+        # file that was never executable and could not fail.
+        os.chmod(installed, 0o755)
         self.args = argparse.Namespace(
             process="fseventsd",
             ceiling="2GiB",
@@ -132,6 +134,7 @@ class VerifyTest(unittest.TestCase):
         codes = self.codes()
         self.assertNotIn("executable_content_differs", codes)
         self.assertNotIn("launchdaemon_differs", codes)
+        self.assertNotIn("executable_not_executable", codes)
 
     def test_an_install_directory_a_non_root_account_owns_is_drift(self) -> None:
         # The prefix here is a temp directory owned by the test user - the exact
@@ -156,6 +159,12 @@ class VerifyTest(unittest.TestCase):
     def test_a_missing_install_is_drift(self) -> None:
         os.unlink(os.path.join(self.prefix, install.INSTALLED_NAME))
         self.assertIn("executable_missing", self.codes())
+
+    def test_an_installed_file_launchd_cannot_execute_is_drift(self) -> None:
+        # Content, owner, and write bits can all be right on a 0644 file, and a
+        # watchdog that never runs reports nothing at all.
+        os.chmod(os.path.join(self.prefix, install.INSTALLED_NAME), 0o644)
+        self.assertIn("executable_not_executable", self.codes())
 
     def test_a_world_writable_executable_is_drift(self) -> None:
         # The privilege-escalation shape: root runs this file every interval.

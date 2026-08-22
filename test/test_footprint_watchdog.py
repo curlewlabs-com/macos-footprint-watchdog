@@ -81,7 +81,13 @@ class TargetProcess:
     replaced?" assertion meaningful.
     """
 
-    def __init__(self, mib: int, respawn_mib: Optional[int] = None) -> None:
+    def __init__(
+        self,
+        mib: int,
+        respawn_mib: Optional[int] = None,
+        extra_instances: int = 0,
+    ) -> None:
+        self.extra: List["TargetProcess"] = []
         self.respawning = respawn_mib is not None
         if self.respawning:
             script = '"$1" "$2" "$4"; while :; do "$1" "$3" "$4"; done'
@@ -106,11 +112,15 @@ class TargetProcess:
             start_new_session=True,
         )
         _wait_for_ready(self.process)
+        for _ in range(extra_instances):
+            self.extra.append(TargetProcess(mib=1))
 
     def pids(self) -> List[int]:
         return [pid for pid, _ in fw.find_targets(_target_bin)]
 
     def close(self) -> None:
+        for extra in self.extra:
+            extra.close()
         try:
             os.killpg(os.getpgid(self.process.pid), signal.SIGKILL)
         except OSError:
@@ -396,6 +406,32 @@ class RunTickTest(unittest.TestCase):
         self.assertNotEqual(after["pid"], original[0])
         self.assertLess(int(str(after["footprint_bytes"])), 32 * 1024 ** 2)
 
+    def test_the_cooldown_stamp_lands_before_the_signal(self) -> None:
+        # The stamp has to be durable before the irreversible half happens. If
+        # it were written after the kill, anything ending this process in
+        # between - a crash, a SIGKILL, a failed write - would leave the next
+        # tick free to signal again, which is the loop the cooldown prevents.
+        # Proven by making the write fail: no stamp means no signal.
+        target = TargetProcess(mib=64)
+        self.addCleanup(target.close)
+        before = target.pids()
+        unwritable = os.path.join(self.directory, "no-such-dir", "target.state.json")
+        self.assertEqual(
+            self.tick(ceiling=32 * 1024 ** 2, state_path=unwritable),
+            fw.EXIT_UNSAFE_PATH,
+        )
+        events = [record["event"] for record in self.records()]
+        self.assertEqual(events, ["ceiling_crossed", "cooldown_stamp_failed"])
+        self.assertEqual(target.pids(), before)
+
+    def test_a_surviving_original_is_not_reported_as_recovery(self) -> None:
+        # A target that does not die on TERM, while something starts a second
+        # instance, must not read as recovered: the runaway is still there, and
+        # measuring the fresh process instead would report success.
+        target = TargetProcess(mib=64, extra_instances=1)
+        self.addCleanup(target.close)
+        self.assertEqual(self.tick(ceiling=32 * 1024 ** 2), fw.EXIT_TARGET_AMBIGUOUS)
+
     def test_failed_respawn_still_records_the_cooldown_stamp(self) -> None:
         # Without a supervisor nothing replaces the target. The stamp must land
         # anyway: a failure that leaves the cooldown unset lets the next tick
@@ -404,7 +440,7 @@ class RunTickTest(unittest.TestCase):
         self.addCleanup(target.close)
         self.assertEqual(self.tick(ceiling=32 * 1024 ** 2), fw.EXIT_RESPAWN_FAILED)
         events = [record["event"] for record in self.records()]
-        self.assertEqual(events, ["ceiling_crossed", "respawn_failed"])
+        self.assertEqual(events, ["ceiling_crossed", "recovery_unconfirmed"])
         self.assertIn("last_restart_epoch", fw.read_state(self.state_path))
 
     def test_replacement_still_above_ceiling_is_reported_not_retried(self) -> None:

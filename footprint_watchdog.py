@@ -42,6 +42,7 @@ import re
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from typing import Callable, Dict, List, Optional, Sequence, TextIO, Tuple, cast
 
@@ -373,10 +374,17 @@ def read_state(state_path: str) -> Dict[str, object]:
 
 
 def write_state(state_path: str, state: Dict[str, object]) -> None:
-    temp_path = state_path + ".tmp"
-    with open(temp_path, "w", encoding="utf-8") as handle:
-        json.dump(state, handle, sort_keys=True)
-        handle.write("\n")
+    """Replace the state file atomically, via a name nothing can predict.
+
+    A fixed `.tmp` sibling would be a predictable path that root opens for
+    writing. The state directory is verified root-only before any of this runs,
+    so nothing else should be able to place a symlink there - but mkstemp costs
+    nothing and removes the need for that argument to hold.
+    """
+    handle, temp_path = tempfile.mkstemp(dir=os.path.dirname(state_path))
+    with os.fdopen(handle, "w", encoding="utf-8") as stream:
+        json.dump(state, stream, sort_keys=True)
+        stream.write("\n")
     os.chmod(temp_path, 0o600)
     os.replace(temp_path, state_path)
 
@@ -407,22 +415,38 @@ def wait_for_replacement(
     now_fn: Callable[[], float],
     sleep_fn: Callable[[float], None],
     poll_seconds: float = DEFAULT_RESPAWN_POLL_SECONDS,
-) -> Optional[Tuple[int, str]]:
-    """Wait for the supervisor to provide a DIFFERENT pid for the same target.
+) -> Tuple[Optional[Tuple[int, str]], str]:
+    """Wait for the supervisor to replace the target, unambiguously.
 
-    Not "wait for the process to be gone", and not "wait a fixed interval":
-    launchd's respawn is throttled and has been observed to leave nothing at all
-    matching for several seconds after the signal, so a check that only looked
-    for absence would call a healthy recovery a failure. A different pid running
-    the same executable is the only thing that proves the replacement happened.
+    Recovery means exactly one process matches and it is not the one signalled.
+    The obvious "any different pid" check gets both halves wrong.
+
+    Requiring the old pid to be gone: a target that ignores TERM can still be
+    running when its supervisor starts a second instance. Measuring the fresh
+    one and calling that recovered would report success while the runaway is
+    alive - and the next tick would find two matches and refuse to act at all.
+
+    Requiring exactly one: with several matches there is no way to say which one
+    the ceiling now describes, which is the same reason the tick refuses an
+    ambiguous target before signalling.
+
+    Not "wait a fixed interval": launchd's respawn is throttled and has been
+    observed to leave nothing matching for several seconds after the signal, so
+    a check that gave up on the first empty poll would call a healthy recovery
+    a failure. Returns (replacement, reason).
     """
     deadline = now_fn() + timeout_seconds
     while True:
-        for pid, path in find_targets(spec):
-            if pid != old_pid:
-                return (pid, path)
+        matches = find_targets(spec)
+        survivors = [pid for pid, _ in matches if pid == old_pid]
+        if not survivors and len(matches) == 1:
+            return (matches[0], "replaced")
         if now_fn() >= deadline:
-            return None
+            if survivors:
+                return (None, "signalled process is still running")
+            if len(matches) > 1:
+                return (None, "several processes match, so no single replacement")
+            return (None, "nothing matches the target")
         sleep_fn(poll_seconds)
 
 
@@ -578,7 +602,10 @@ def main(
     # A tick can outlive its interval while waiting for a respawn, so two ticks
     # can overlap. Whoever holds the lock is already handling this target;
     # the loser exits silently rather than sending a second signal.
-    lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    # O_NOFOLLOW so the lock can never be a symlink root writes through. The
+    # directory check above should already make that impossible; this makes the
+    # open itself refuse rather than depending on it.
+    lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:
         fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError as exc:
@@ -704,6 +731,28 @@ def run_tick(
         emit({"event": "target_changed_before_signal", "process": spec, "pid": sample.pid}, out)
         return EXIT_TARGET_ABSENT
 
+    # Stamped BEFORE the signal, which is the irreversible half. Anything that
+    # ends this process between the two - a crash, a SIGKILL, a failed write -
+    # leaves the next tick free to signal again, which is the restart loop the
+    # cooldown exists to prevent. Recording an attempt that then fails to happen
+    # costs one cooldown window; the other order costs the guarantee.
+    if state_path is not None:
+        state["last_restart_epoch"] = now_epoch
+        state["last_restart_pid"] = sample.pid
+        state["last_restart_footprint_bytes"] = sample.footprint
+        try:
+            write_state(state_path, state)
+        except OSError as exc:
+            emit(
+                {
+                    "event": "cooldown_stamp_failed",
+                    "path": state_path,
+                    "reason": "%s; refusing to signal without a durable cooldown" % exc,
+                },
+                out,
+            )
+            return EXIT_UNSAFE_PATH
+
     signal_number = signal.SIGTERM if signal_name == "TERM" else signal.SIGKILL
     try:
         os.kill(sample.pid, signal_number)
@@ -711,25 +760,17 @@ def run_tick(
         emit({"event": "signal_failed", "pid": sample.pid, "reason": str(exc)}, out)
         return EXIT_RESPAWN_FAILED
 
-    # Stamped BEFORE the respawn wait, not after: if this process dies while
-    # waiting, the cooldown must still hold, or the next tick signals again.
-    if state_path is not None:
-        state["last_restart_epoch"] = now_epoch
-        state["last_restart_pid"] = sample.pid
-        state["last_restart_footprint_bytes"] = sample.footprint
-        write_state(state_path, state)
-
-    replacement = wait_for_replacement(
+    replacement, reason = wait_for_replacement(
         spec, sample.pid, respawn_timeout, now_fn, sleep_fn
     )
     if replacement is None:
         emit(
             {
-                "event": "respawn_failed",
+                "event": "recovery_unconfirmed",
                 "process": spec,
                 "signalled_pid": sample.pid,
                 "waited_seconds": respawn_timeout,
-                "reason": "no different pid appeared; supervisor may not restart this target",
+                "reason": reason,
             },
             out,
         )

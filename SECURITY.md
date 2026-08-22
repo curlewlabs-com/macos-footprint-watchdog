@@ -16,7 +16,8 @@ root-owned and writable by nobody else. Checking the leaf's mode alone would
 miss two shapes: a `0755` directory owned by another account, which that account
 can still write, and a writable ancestor, which lets it replace the directory
 entirely. The watchdog applies the same rule to its state directory before
-creating lock and state files at predictable names there as root.
+creating lock and state files there as root, and the configured log path gets
+it as well, since launchd opens that path as root on every run.
 
 ## Supported versions
 

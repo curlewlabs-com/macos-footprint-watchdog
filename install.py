@@ -114,6 +114,29 @@ def prepare_install_dir(directory: str) -> None:
     require_root_only_path(directory, "install into")
 
 
+def require_root_only_log(log_path: str) -> None:
+    """Refuse a log destination that is not root's alone to write.
+
+    launchd opens this path as root on every run. Pointed at a directory some
+    other account can write - `/tmp/watchdog.log` is the obvious spelling - that
+    account can pre-place a symlink there and choose a file for root to append
+    to. The directory has to be root-only, and an existing log has to be a plain
+    root-owned file rather than a link.
+    """
+    require_root_only_path(os.path.dirname(log_path) or "/", "write a log into")
+    if os.path.islink(log_path):
+        sys.stderr.write("refusing to log to %s: it is a symlink\n" % log_path)
+        raise SystemExit(2)
+    if os.path.exists(log_path):
+        info = os.stat(log_path)
+        if info.st_uid != 0 or (info.st_mode & 0o022):
+            sys.stderr.write(
+                "refusing to log to %s: not root-owned, or writable by a non-root "
+                "account\n" % log_path
+            )
+            raise SystemExit(2)
+
+
 def require_root_only_path(path: str, action: str) -> None:
     unsafe = fw.unsafe_path_owners(path)
     if unsafe:
@@ -187,6 +210,7 @@ def do_install(args: argparse.Namespace) -> int:
         signal_name=args.signal,
     )
     require_root_only_path(LAUNCH_DAEMONS, "write a LaunchDaemon into")
+    require_root_only_log(str(args.log))
     write_plist(plist_path, contents)
     print("installed %s" % plist_path)
 
@@ -227,6 +251,10 @@ def verify_problems(args: argparse.Namespace) -> List[Tuple[str, str]]:
         info = os.stat(executable)
         if info.st_uid != 0:
             problems.append(("executable_not_root_owned", executable))
+        # Content, owner and write bits can all be correct on a file launchd
+        # simply cannot run, and a watchdog that never runs reports nothing.
+        if not info.st_mode & 0o111:
+            problems.append(("executable_not_executable", executable))
         # Group- or world-writable means an account that is not root chooses
         # what root executes every interval.
         if info.st_mode & 0o022:

@@ -134,9 +134,9 @@ must never trigger one.
 | 4 | Target not running, or unreadable |
 | 5 | More than one process matched - refused to act |
 | 6 | Above the ceiling but inside the cooldown - suppressed |
-| 7 | Signalled, but no replacement appeared |
+| 7 | Signalled, but recovery could not be confirmed |
 | 8 | Replacement appeared and is already above the ceiling |
-| 9 | The state directory, or something above it, is not root-only |
+| 9 | The state directory is not root-only, or the cooldown could not be stamped |
 
 Codes 6, 7 and 8 are the ones worth alerting on. Each means the failure is not
 being fixed by restarting, which is a different problem from the one this tool
@@ -156,13 +156,19 @@ to the wrong thing.
 - **The target is re-proven immediately before the signal.** A pid measured a
   moment ago can exit and have its number reused; the identity is re-checked
   against the executable path rather than assumed to have held.
-- **A cooldown, stamped before the outcome is known.** If the process is above
-  the ceiling again within the cooldown, the tool reports and stops instead of
-  restarting. The stamp is written before waiting for the replacement, so a
-  watchdog that dies mid-recovery still cannot produce a restart loop.
-- **Recovery is verified, not assumed.** It waits for a *different* pid running
-  the same executable, then measures that one. "The old process is gone" is not
-  accepted as success.
+- **The cooldown is stamped before the signal, not after.** If the process is
+  above the ceiling again within the cooldown, the tool reports and stops
+  instead of restarting. The stamp is durable before the irreversible half
+  happens, so a watchdog that crashes - or that cannot write the stamp at all -
+  leaves the next tick blocked rather than free to signal again. A stamp that
+  cannot be written means no signal is sent.
+- **Recovery is verified, and ambiguity is not recovery.** It waits until
+  exactly one process matches and it is not the one signalled. A target that
+  ignores `TERM` while something starts a second instance therefore reports a
+  failure rather than measuring the fresh process and calling it recovered.
+- **The log destination is checked too.** launchd opens it as root on every
+  run, so `--log` is refused unless its directory is root-only and any existing
+  file is a plain root-owned file rather than a symlink.
 - **The install refuses a destination root does not solely control.** Every
   directory on the way to the installed executable, and to the LaunchDaemon,
   must be root-owned and not writable by anyone else. A mode check alone is not

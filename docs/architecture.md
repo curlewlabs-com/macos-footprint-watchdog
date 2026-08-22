@@ -152,12 +152,18 @@ by the nearest ancestor that does, since that is what decides who can create it.
 The signal is `TERM` by default; `KILL` is available but is not the default,
 because the point is to let the supervisor replace the process cleanly.
 
-Recovery is confirmed by waiting for a **different pid running the same
-executable** - not by waiting for the old process to disappear. launchd's
-respawn is throttled, and in the motivating incident nothing matched for several
-seconds after the signal. A check that looked for absence would have called a
-healthy recovery a failure. The replacement is then measured, and only a
-replacement below the ceiling counts as recovered.
+Recovery means **exactly one process matches, and it is not the one signalled**.
+The replacement is then measured, and only a replacement below the ceiling
+counts as recovered.
+
+Each half of that rules out a different wrong answer. Waiting merely for the old
+process to disappear would call a healthy recovery a failure: launchd's respawn
+is throttled, and in the motivating incident nothing matched for several seconds
+after the signal. Accepting merely any different pid would do the opposite - a
+target that ignores `TERM` can still be running when its supervisor starts a
+second instance, and measuring the fresh one would report success while the
+runaway is alive. The tick after that would find two matches and refuse to act
+at all, so the watchdog would go quiet on a host it had already given up on.
 
 ## Cooldown, and why it is stamped early
 
@@ -166,9 +172,12 @@ reports and stops. Without that, a failure that reproduces immediately - a bad
 ceiling, or growth that is not what was diagnosed - becomes a restart loop
 driven by the watchdog itself.
 
-The stamp is written **before** the respawn wait, not after. If the watchdog
-process dies while waiting, the cooldown must still hold; a stamp written only
-on the success path would leave the next tick free to signal again.
+The stamp is written **before the signal**, which is the irreversible half.
+Anything that ends this process in between - a crash, a SIGKILL, a failed
+write - would otherwise leave the next tick free to signal again. If the stamp
+cannot be written at all, no signal is sent: recording an attempt that then does
+not happen costs one cooldown window, while the other order costs the
+guarantee.
 
 A corrupt state file reads as empty rather than raising. The cost of losing the
 stamp is one extra restart; the cost of refusing to run is the failure this
