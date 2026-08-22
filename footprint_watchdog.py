@@ -7,18 +7,18 @@ it with a healthy one. Below the ceiling it exits silently and writes nothing.
 
 Shape: this checks once and exits. launchd owns the cadence via `StartInterval`,
 because a watchdog that is itself a long-lived process can become the thing that
-needs watching -- and the daemons this exists to catch are ones that grew
+needs watching - and the daemons this exists to catch are ones that grew
 unbounded over days of uptime.
 
 Metric: `phys_footprint` from the kernel's per-task ledger, not RSS. Under the
 memory pressure a runaway daemon creates, its own pages get compressed and
 swapped out, so RSS *falls* as the failure worsens. The observation that
 motivated this tool held a 31.5 GiB footprint with all but a few MiB of it
-swapped out -- pages RSS does not count at all. Footprint counts them, which is
+swapped out - pages RSS does not count at all. Footprint counts them, which is
 why it is the governed signal and RSS is not.
 
 Source: `proc_pid_rusage`, the same task-accounting ledger `vmmap` and
-`footprint(1)` report from -- read directly rather than by parsing either one.
+`footprint(1)` report from - read directly rather than by parsing either one.
 `vmmap -summary` walks the whole VM map, which costs time proportional to the
 allocation count: measured at 22.3s for a process holding 8M allocations, and
 the failure this was written for held ~92M. Spending minutes of CPU to take a
@@ -230,7 +230,7 @@ def pid_path(pid: int) -> Optional[str]:
 def find_targets(spec: str) -> List[Tuple[int, str]]:
     """Every running process matching `spec`, as (pid, executable path).
 
-    Matching is EXACT -- full path if `spec` is absolute, else basename. This is
+    Matching is EXACT - full path if `spec` is absolute, else basename. This is
     the tool's central safety property: it runs as root and sends signals, so a
     substring match ("fsevents" also matching some unrelated `fseventsd-probe`)
     is how a watchdog kills the wrong process with full privileges. An exact
@@ -242,7 +242,7 @@ def find_targets(spec: str) -> List[Tuple[int, str]]:
     """
     absolute = spec.startswith("/")
     # proc_pidpath reports the resolved path, so an absolute spec is resolved
-    # too or the comparison fails on any symlinked prefix -- `/tmp/x` never
+    # too or the comparison fails on any symlinked prefix - `/tmp/x` never
     # matches, because the kernel reports the process as `/private/tmp/x`.
     if absolute:
         spec = os.path.realpath(spec)
@@ -262,7 +262,7 @@ def host_context(context_command: Optional[str]) -> Dict[str, object]:
     """Host-wide numbers that explain a crossing but never trigger one.
 
     Swap and load include every other process on the box, so they cannot tell a
-    runaway daemon apart from an honestly busy machine -- they belong in the
+    runaway daemon apart from an honestly busy machine - they belong in the
     record as context and nowhere in the decision.
     """
     context: Dict[str, object] = {}
@@ -430,7 +430,7 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="NAME",
         help=(
             "Also count processes matching this name and record the count in the "
-            "crossing record -- e.g. the workload whose scheduling the runaway "
+            "crossing record - e.g. the workload whose scheduling the runaway "
             "daemon is degrading."
         ),
     )
@@ -461,8 +461,8 @@ def main(
 
     # A dry run only reads, so it takes no lock, keeps no state, and is exempt
     # from both the root requirement and the cooldown. That is what makes it
-    # usable for the job it exists for -- watching a candidate ceiling against a
-    # live process before arming anything -- and running it can change nothing.
+    # usable for the job it exists for - watching a candidate ceiling against a
+    # live process before arming anything - and running it can change nothing.
     if dry_run:
         return run_tick(
             spec=spec,

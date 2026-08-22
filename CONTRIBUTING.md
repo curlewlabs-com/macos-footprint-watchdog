@@ -9,9 +9,10 @@ clearer docs are all welcome.
 ## Before a large change
 
 Open an issue describing the problem first. The signalling path carries the
-load-bearing safety invariants (exact path matching, ambiguity refusal, target
+safety invariants (exact path matching, ambiguity refusal, target
 re-verification before the signal, the cooldown stamped before the outcome is
-known), so a short discussion up front saves rework.
+known), so a
+short discussion up front saves rework.
 
 ## Running the checks
 
@@ -34,8 +35,8 @@ kernel ledger. The type check runs anywhere - `pyrightconfig.json` pins
 - **Prefer a real process over a mocked measurement.** The bugs worth catching
   here live at the boundary: what `proc_pidpath` reports, whether a signalled
   process is actually replaced, whether the ledger reflects an allocation. A
-  test that mocks `read_sample` asserts only that this file is
-  self-consistent, which was never in doubt.
+  test that mocks `read_sample` only asserts that this file agrees with
+  itself.
 - **No change-detector tests.** A test that pins a literal (the exact plist
   dict, an exact log string) fails on every legitimate edit while catching
   nothing. Test the invariant instead - for example, that the arguments the

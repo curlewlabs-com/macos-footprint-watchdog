@@ -3,11 +3,10 @@
 The integration cases drive real processes through the real kernel ledger rather
 than a mocked measurement, because every bug worth catching here lives in the
 boundary: what `proc_pidpath` actually reports, whether a signalled process is
-actually replaced, whether the ledger actually reflects an allocation. A mocked
-`read_sample` would assert that the arithmetic in this file is self-consistent,
-which was never in doubt.
+actually replaced, whether the ledger actually reflects an allocation. A mocked `read_sample` would only
+assert that the arithmetic in this file agrees with itself.
 
-The target is compiled per run -- see test/footprint_target.c for why nothing
+The target is compiled per run - see test/footprint_target.c for why nothing
 already on the system can serve as one.
 """
 

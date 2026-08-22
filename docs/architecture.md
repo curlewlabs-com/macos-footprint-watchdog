@@ -48,7 +48,7 @@ itself is a single syscall, and the quiet path does no I/O at all.
 The measurement is `ri_phys_footprint` from `proc_pid_rusage`, flavor 0. Three
 alternatives were considered and rejected on measured grounds.
 
-**RSS is wrong, not merely worse.** As a runaway process pushes the machine into
+**RSS moves the wrong way.** As a runaway process pushes the machine into
 swap, its own pages are compressed and paged out, and RSS stops counting them.
 RSS therefore falls as the failure worsens. In the motivating failure nearly the
 entire 31.5 GiB was swapped out - invisible to RSS. A threshold on RSS would be
@@ -153,8 +153,7 @@ second signal at a process that is already being replaced.
 
 Below the ceiling the tool writes nothing at all - not a heartbeat, not a
 "checked, fine" line. A watchdog that logs every healthy tick trains its reader
-to ignore its log, which costs exactly the thing the log exists for. Every line
-in the log is an event that needed a human eye.
+to ignore the log. Every line in the log is an event that needed a human eye.
 
 The `--verify` path is the counterpart: rather than logging continuously to
 prove the install is intact, the install can be re-checked against the tracked

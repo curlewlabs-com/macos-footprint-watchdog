@@ -8,7 +8,7 @@ system daemon.
 
 `--verify` re-derives the executable and the plist from the tracked sources and
 compares them byte for byte against what is installed, so a host that drifted --
-someone edited the plist in place, or an install predates a change here -- is a
+someone edited the plist in place, or an install predates a change here - is a
 non-zero exit rather than a silent difference between the repo and the machine.
 """
 
@@ -35,7 +35,7 @@ LABEL_PREFIX = "com.curlewlabs.footprint-watchdog"
 LAUNCH_DAEMONS = "/Library/LaunchDaemons"
 # The interpreter the installed executable's shebang names. Verified at install
 # time because a missing Command Line Tools install makes /usr/bin/python3 a stub
-# that opens a GUI prompt -- harmless in a terminal, a silently dead daemon here.
+# that opens a GUI prompt - harmless in a terminal, a silently dead daemon here.
 INTERPRETER = "/usr/bin/python3"
 
 
@@ -96,8 +96,8 @@ def prepare_install_dir(directory: str) -> None:
     precondition to report.
 
     The installed file is executed by root every interval. If the directory it
-    sits in is group- or world-writable -- which /usr/local often is on a Mac
-    where a package manager took ownership -- then any account that can write
+    sits in is group- or world-writable - which /usr/local often is on a Mac
+    where a package manager took ownership - then any account that can write
     there chooses what root runs.
     """
     if not os.path.isdir(directory):
@@ -126,7 +126,7 @@ def write_plist(target_path: str, contents: Dict[str, object], mode: int = 0o644
     """Write a plist atomically, with the ownership and mode launchd requires.
 
     No explicit chown: launchd refuses a job file that is not root-owned or that
-    is group/world writable, and both hold already -- installation runs as root,
+    is group/world writable, and both hold already - installation runs as root,
     so the temporary file is created root-owned, and the mode is set here. The
     temp-and-rename keeps a half-written plist from ever being visible under the
     real name, which launchd would read on its next scan.
@@ -187,9 +187,9 @@ def do_install(args: argparse.Namespace) -> int:
 def verify_problems(args: argparse.Namespace) -> List[Tuple[str, str]]:
     """Every way the installed state differs from the tracked sources.
 
-    Returns (code, detail) pairs. The code is the stable half -- it is what a
+    Returns (code, detail) pairs. The code is the stable half - it is what a
     caller keys on and what stays constant while the human-readable detail
-    changes -- and an empty list means the host matches the repo.
+    changes - and an empty list means the host matches the repo.
 
     Separate from `do_verify` so the drift detection can be exercised without
     the privileges that writing a real install requires: a verification nobody
@@ -254,9 +254,8 @@ def do_uninstall(args: argparse.Namespace) -> int:
     if os.path.exists(executable):
         os.unlink(executable)
         print("removed %s" % executable)
-    # The state directory is deliberately left behind: it holds the cooldown
-    # stamps that explain what this host did, which is the record a reinstall
-    # should not silently discard.
+    # The state directory is left behind: it holds the cooldown stamps that
+    # record what this host did, and a reinstall should not discard them.
     return 0
 
 

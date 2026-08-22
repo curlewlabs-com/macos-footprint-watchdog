@@ -79,9 +79,9 @@ capturing how much real work was in flight when the ceiling was crossed.
 
 ## Choosing a ceiling
 
-There is no default, deliberately: the right number depends on what the process
-does on your host, and a wrong one either never fires or restarts something
-healthy. Measure first.
+There is no default: the right number depends on what the process does on your
+host, and a wrong one either never fires or restarts something healthy. Measure
+first.
 
 ```sh
 # What is it right now? A ceiling of 1 byte forces a report.
@@ -117,11 +117,11 @@ One line of JSON per event, and nothing at all on a healthy tick.
  "after": {"pid": 78708, "footprint_bytes": 4404019, "age_seconds": 1.2, ...}}
 ```
 
-`before` and `after` are the whole point: they are the evidence that the restart
-did what it was supposed to, and the record from which the ceiling can be
-re-tuned. The `host` block - load average, swap, an optional process count - is
-context only. Those numbers include every other process on the machine, so they
-can explain a crossing but must never trigger one.
+`before` and `after` are why the record exists: they show whether the restart
+worked, and they are what you re-tune the ceiling from. The `host` block - load
+average, swap, an optional process count - is context only. Those numbers
+include every other process on the machine, so they can explain a crossing but
+must never trigger one.
 
 ## Exit codes
 
@@ -195,8 +195,8 @@ and means `MiB` - it renders 727,253,808 bytes as `694 MB`. The ledger read
 gives an exact `uint64` of bytes with no parsing step, so the number in the log
 is the number the decision was made on.
 
-One more thing worth knowing: `--process` matches the **resolved executable
-path**, which is not always the path you typed. `/usr/bin/python3` is a shim
+`--process` matches the **resolved executable path**, which is not always the
+path you typed. `/usr/bin/python3` is a shim
 that execs a framework binary, so a Python process reports as
 `.../Python3.framework/.../Python`. If a match unexpectedly finds nothing, run
 with `--ceiling 1 --dry-run` and look at the `path` field.
@@ -214,9 +214,9 @@ supervisor replace it - rather than mocking the measurement. See the docstring
 in `test/test_footprint_watchdog.py` for why, and `test/footprint_target.c` for
 why the target has to be compiled per run.
 
-CI runs both on `macos-15` and `macos-26`, because the thing being read is a
-kernel structure and a change between major versions is exactly the regression
-worth catching.
+CI runs both on `macos-15` and `macos-26`. The thing being read is a kernel
+structure, so a change between major versions is the regression most worth
+catching.
 
 ## License
 

@@ -1,9 +1,9 @@
 """Tests for install.py.
 
-Deliberately not a test that the generated plist equals a literal dict -- that
-would fail on every legitimate edit while catching nothing. What is checked here
-is the pair of invariants that cross a component boundary, where a mismatch
-produces a daemon that fails silently every interval:
+There is no test that the generated plist equals a literal dict: that would fail
+on every legitimate edit while catching nothing. What is checked here is the pair
+of invariants that cross a component boundary, where a mismatch produces a daemon
+that fails silently every interval:
 
 - the arguments the installer writes into the plist are arguments the watchdog's
   own parser accepts, and
