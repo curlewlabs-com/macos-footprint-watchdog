@@ -50,8 +50,19 @@ kernel ledger. The type check runs anywhere - `pyrightconfig.json` pins
 - **Safe by default stays the default.** `--dry-run` signals nothing; anything
   new that can act on a process stays behind an explicit flag and the existing
   identity checks.
+- **Keep tracked text ASCII.** Use plain hyphens, `->`, and words instead of
+  Unicode punctuation or decorative symbols.
 
 ## Submitting
 
 Keep each pull request focused on one change, make sure both checks pass, and
 describe the _why_ in the PR body. CI must be green before merge.
+
+## Releasing
+
+Releases use fixed `vMAJOR.MINOR.PATCH` tags. The repository blocks updates and
+deletions of those tags, and publishing the GitHub Release makes its tag and
+release assets immutable. After merging the release commit to `main`, create
+and push the version tag, then publish that same tag with `gh release create`.
+Do not create a moving version alias unless the release contract is explicitly
+expanded to support one.
