@@ -78,14 +78,21 @@ store; only its contents and UUID change. A volume that does carry the marker - 
 machine with no Time Machine, say - is left alone: the tick reads it as history
 switched off and stays silent.
 
-To confirm a backup after a purge completed, look for backupd's own line rather
-than the absence of an error, since an absence also follows a backup that never
-ran:
+To confirm a backup completed after a purge, look for backupd's own success
+line rather than the absence of an error, since an absence also follows a
+backup that never ran. The purge's time is `last_history_purge_epoch` in the
+target's state file under `/var/db/footprint-watchdog`; a `Backup succeeded`
+line dated after it is the confirmation:
 
 ```sh
+sudo sh -c 'cat /var/db/footprint-watchdog/fseventsd-*.state.json'
 log show --last 1d --info --style compact \
-  --predicate 'subsystem == "com.apple.TimeMachine" AND eventMessage BEGINSWITH "Finished copying from volume"'
+  --predicate 'subsystem == "com.apple.TimeMachine" AND category == "BackupDispatching" AND eventMessage BEGINSWITH "Backup succeeded"'
 ```
+
+backupd logs `Backup succeeded` once the whole backup has completed. Its
+per-volume `Finished copying from volume` lines mark only the end of each
+volume's copy, not of the backup.
 
 `--history-ceiling SIZE` changes the ceiling and `--history-ceiling off` turns
 the check off; both work on the watchdog and the installer.
