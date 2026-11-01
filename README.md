@@ -80,19 +80,20 @@ switched off and stays silent.
 
 To confirm a backup completed after a purge, look for backupd's own success
 line rather than the absence of an error, since an absence also follows a
-backup that never ran. The purge's time is `last_history_purge_epoch` in the
-target's state file under `/var/db/footprint-watchdog`; a `Backup succeeded`
-line dated after it is the confirmation:
+backup that never ran. Start from the `time` of the `history_purged` record, or
+of `history_above_ceiling_after_purge`; `fseventsd` has accepted the purge
+before either is written:
 
 ```sh
-sudo sh -c 'cat /var/db/footprint-watchdog/fseventsd-*.state.json'
-log show --last 1d --info --style compact \
+log show --start '<time from the history_purged record>' --info --style compact \
   --predicate 'subsystem == "com.apple.TimeMachine" AND category == "BackupDispatching" AND eventMessage BEGINSWITH "Backup succeeded"'
 ```
 
-backupd logs `Backup succeeded` once the whole backup has completed. Its
+backupd logs `Backup succeeded` once the whole backup has completed; its
 per-volume `Finished copying from volume` lines mark only the end of each
-volume's copy, not of the backup.
+volume's copy, not of the backup. No line means no backup has succeeded since
+the purge, provided the unified log still reaches back that far: it rotates
+on its own schedule, so read it before the purge ages out of it.
 
 `--history-ceiling SIZE` changes the ceiling and `--history-ceiling off` turns
 the check off; both work on the watchdog and the installer.
@@ -165,7 +166,8 @@ adjust from your own evidence rather than from this paragraph.
 
 ## What it records
 
-One line of JSON per event, and nothing at all on a healthy tick.
+One line of JSON per event, and nothing at all on a healthy tick. Every record
+carries a `time` in UTC, in a form `log show --start` accepts as written.
 
 ```json
 {"event": "ceiling_crossed", "process": "fseventsd", "ceiling_bytes": 2147483648,

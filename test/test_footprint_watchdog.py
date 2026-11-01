@@ -585,5 +585,28 @@ class RunTickTest(unittest.TestCase):
         self.assertEqual(target.pids(), surviving)
 
 
+
+class RecordTimeTest(unittest.TestCase):
+    def test_a_records_time_is_accepted_by_log_show_as_written(self) -> None:
+        # The README has operators paste a record's time into `log show
+        # --start` to read what the OS logged after it; a form `log` cannot
+        # parse leaves that check unusable exactly when it is needed. Asked of
+        # `log` itself, not of a format string, since `log` owns what it parses.
+        out = io.StringIO()
+        fw.emit({"event": "probe"}, out)
+        stamp = str(json.loads(out.getvalue())["time"])
+        result = subprocess.run(
+            [
+                "/usr/bin/log", "show", "--start", stamp, "--end", stamp,
+                "--predicate", 'process == "footprint-watchdog-no-such-process"',
+            ],
+            capture_output=True,
+            text=True,
+            timeout=INFINITE,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("Failed conversion", result.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
