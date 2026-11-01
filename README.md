@@ -21,6 +21,10 @@ ceiling it writes nothing at all.
 - **It refuses rather than guesses.** Exact executable-path matching, a
   re-verified target immediately before signalling, and a hard stop if more than
   one process matches.
+- **For `fseventsd` it bounds the event history too.** The daemon's other
+  unbounded growth is the change history it keeps on disk; above a ceiling the
+  tool asks `fseventsd` to purge it. On by default for `fseventsd`, off for
+  every other target.
 
 ## Use this for fseventsd
 
@@ -40,8 +44,51 @@ why the tool restarts on a measured threshold rather than on a timer.
 sudo ./install.py --process fseventsd --ceiling 2GiB --interval 300
 ```
 
-Nothing about the tool is specific to `fseventsd`; point `--process` at whatever
-is misbehaving on your host.
+Nothing about the restart is specific to `fseventsd`; point `--process` at
+whatever is misbehaving on your host.
+
+### Its event history, too
+
+`fseventsd` also keeps a persisted history of every change on the Data volume,
+in `/System/Volumes/Data/.fseventsd`, and on a machine with heavy churn it has
+been seen to run to days and past ten GiB. The history costs nothing until a
+client asks for events since an early point, which makes `fseventsd` read all of
+it back; a system service that does that on every launch, and is launched
+often, keeps `fseventsd` near a full core indefinitely.
+
+So when the target is `fseventsd`, every tick also measures that history, and
+above a history ceiling - 1 GiB unless you say otherwise - it asks `fseventsd`
+to purge it through the public `FSEventsPurgeEventsForDeviceUpToEventId` call.
+A healthy history on a busy build machine measures in MiB, and the ones seen
+holding a core ran past ten GiB, so the default sits far from both; that wide
+gap is why this has a default when the memory ceiling does not.
+
+What a purge costs: `fseventsd` gives the volume's event store a new UUID.
+Apple's FSEvents contract has a client treat a changed UUID as lost history, so
+one that saved an event ID - Time Machine, Spotlight, backup and sync tools -
+has to find its changes another way, typically by rescanning, instead of
+reading the history. That is why it happens only above a measured ceiling and is held
+by the same cooldown as a restart, never on a timer.
+
+Why not Apple's per-volume `no_log` marker, which stops the history entirely: on
+macOS 26, with that marker in effect on the Data volume, every Time Machine
+backup fails in preflight (`No event store UUID for volume`,
+`BACKUP_FAILED_PREFLIGHT_STAGE_DATABASE_GENERATION (301)`). A purge keeps the
+store; only its contents and UUID change. A volume that does carry the marker - a CI
+machine with no Time Machine, say - is left alone: the tick reads it as history
+switched off and stays silent.
+
+To confirm a backup after a purge completed, look for backupd's own line rather
+than the absence of an error, since an absence also follows a backup that never
+ran:
+
+```sh
+log show --last 1d --info --style compact \
+  --predicate 'subsystem == "com.apple.TimeMachine" AND eventMessage BEGINSWITH "Finished copying from volume"'
+```
+
+`--history-ceiling SIZE` changes the ceiling and `--history-ceiling off` turns
+the check off; both work on the watchdog and the installer.
 
 ## Install
 
@@ -76,7 +123,8 @@ some other account controls. Run it from configuration management to catch a
 host that quietly diverged.
 
 Other options: `--interval` (seconds between checks, default 300), `--cooldown`
-(minimum seconds between restarts, default 3600), `--log` (default
+(minimum seconds between restarts, and between history purges; default 3600),
+`--history-ceiling` (see above), `--log` (default
 `/var/log/footprint-watchdog.log`), `--prefix`, and `--context-command`, which
 records a count of some other process in the crossing record - useful for
 capturing how much real work was in flight when the ceiling was crossed.
@@ -121,6 +169,16 @@ One line of JSON per event, and nothing at all on a healthy tick.
  "after": {"pid": 78708, "footprint_bytes": 3862528, "age_seconds": 1.2, ...}}
 ```
 
+A history purge records the same way, sizes in bytes and the store's UUID on
+each side:
+
+```json
+{"event": "history_ceiling_crossed", "volume": "/System/Volumes/Data", "history_ceiling_bytes": 1073741824,
+ "before": {"history_bytes": 12884901888, "files": 9214, "uuid": "A6109D22-..."}, ...}
+{"event": "history_purged", "volume": "/System/Volumes/Data", "purged_through_event_id": "0x110f2c282",
+ "before": {"history_bytes": 12884901888, ...}, "after": {"history_bytes": 41674, "files": 2, "uuid": "6885886D-..."}}
+```
+
 `before` and `after` are why the record exists: they show whether the restart
 worked, and they are what you re-tune the ceiling from. The `host` block - load
 average, swap, an optional process count - is context only. Those numbers
@@ -140,8 +198,14 @@ must never trigger one.
 | 7 | Signalled, but recovery could not be confirmed |
 | 8 | Replacement appeared and is already above the ceiling |
 | 9 | The state directory is not root-only, or the cooldown could not be stamped |
+| 10 | History over its ceiling, and `fseventsd` refused the purge |
+| 11 | Purged, and the history is still over its ceiling |
 
-Codes 6, 7 and 8 are the ones worth alerting on. Each means the failure is not
+A tick that ran both checks exits with the first code that is not 0, restart
+check first. Code 6 covers a history back over its ceiling within the cooldown
+as well as a process.
+
+Codes 6, 7, 8, 10 and 11 are the ones worth alerting on. Each means the failure is not
 being fixed by restarting, which is a different problem from the one this tool
 handles.
 
@@ -180,6 +244,10 @@ to the wrong thing.
   The watchdog applies the same rule to its state directory before creating
   predictable lock and state paths there as root.
 - **`TERM`, not `KILL`, by default.**
+- **A purge stays on its own volume.** `--history-volume` must be a mount
+  point, checked with `statfs` rather than `os.path.ismount`, which firmlinks
+  fool on the Data volume. The purge acts on whichever device a path is on, so
+  a mistyped path would otherwise purge the volume containing it.
 
 Reporting a security issue: see [SECURITY.md](SECURITY.md). Please use private
 vulnerability reporting rather than a public issue.
@@ -220,8 +288,13 @@ with `--ceiling 1 --dry-run` and look at the `path` field.
 
 ```sh
 /usr/bin/python3 -m unittest discover -s test -v   # needs macOS and cc
+sudo /usr/bin/python3 -m unittest discover -s test -p 'test_fsevents_history.py' -v
 npx pyright@1.1.409                                # strict, runs anywhere
 ```
+
+The history purge cases need root and skip without it. They attach a small APFS
+disk image, churn files on it until `fseventsd` has written journals, and purge
+only that image's history.
 
 The tests drive real processes through the real kernel ledger - compiling their
 own target, allocating a known amount, signalling it, and watching a stand-in

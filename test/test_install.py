@@ -57,6 +57,7 @@ class GeneratedArgumentsTest(unittest.TestCase):
             cooldown=kwargs.get("cooldown"),  # type: ignore[arg-type]
             context_command=kwargs.get("context_command"),  # type: ignore[arg-type]
             signal_name=kwargs.get("signal_name"),  # type: ignore[arg-type]
+            history_ceiling=kwargs.get("history_ceiling"),  # type: ignore[arg-type]
         )
         return cast(List[str], contents["ProgramArguments"])
 
@@ -68,12 +69,25 @@ class GeneratedArgumentsTest(unittest.TestCase):
 
     def test_every_optional_argument_parses_too(self) -> None:
         arguments = self.parse_generated(
-            cooldown=1800, context_command="Runner.Worker", signal_name="KILL"
+            cooldown=1800,
+            context_command="Runner.Worker",
+            signal_name="KILL",
+            history_ceiling="512MiB",
         )
         parsed = fw.build_parser().parse_args(arguments[1:])
         self.assertEqual(parsed.cooldown, 1800)
         self.assertEqual(parsed.context_command, "Runner.Worker")
         self.assertEqual(parsed.signal, "KILL")
+        self.assertEqual(
+            fw.resolve_history_ceiling(str(parsed.process), parsed.history_ceiling),
+            512 * 1024 ** 2,
+        )
+
+    def test_a_history_ceiling_of_off_reaches_the_watchdog_as_off(self) -> None:
+        # The installer's spelling has to switch the default off, not parse as
+        # a size or be dropped on the way to the plist.
+        parsed = fw.build_parser().parse_args(self.parse_generated(history_ceiling="off")[1:])
+        self.assertIsNone(fw.resolve_history_ceiling(str(parsed.process), parsed.history_ceiling))
 
     def test_the_first_argument_is_the_executable_launchd_will_run(self) -> None:
         self.assertEqual(self.parse_generated()[0], "/usr/local/sbin/footprint-watchdog")
@@ -263,6 +277,7 @@ class VerifyTest(unittest.TestCase):
             log="/var/log/footprint-watchdog.log",
             prefix=self.prefix,
             signal=None,
+            history_ceiling=None,
         )
         install.write_plist(
             install.plist_path_for("fseventsd"),

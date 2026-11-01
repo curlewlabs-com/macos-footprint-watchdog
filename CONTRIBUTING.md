@@ -16,12 +16,16 @@ short discussion up front saves rework.
 
 ## Running the checks
 
-These are the same two checks CI runs on every push and PR:
+These are the same checks CI runs on every push and PR:
 
 ```sh
 /usr/bin/python3 -m unittest discover -s test -v   # macOS, needs cc
+sudo /usr/bin/python3 -m unittest discover -s test -p 'test_fsevents_history.py' -v
 npx pyright@1.1.409                                # strict; runs anywhere
 ```
+
+The second line runs the FSEvents history cases, which need root and skip in
+the first. They purge only a disk image they attach themselves.
 
 The test suite needs macOS: it compiles a target process and reads the real
 kernel ledger. The type check runs anywhere - `pyrightconfig.json` pins

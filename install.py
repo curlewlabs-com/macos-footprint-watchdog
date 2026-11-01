@@ -64,6 +64,16 @@ def ceiling_string(text: str) -> str:
     return text
 
 
+def history_ceiling_string(text: str) -> str:
+    """Validate --history-ceiling at parse time, keeping the operator's spelling,
+    for the same reason ceiling_string does."""
+    try:
+        fw.resolve_history_ceiling(fw.HISTORY_DEFAULT_PROCESS, text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc))
+    return text
+
+
 def label_for(process: str) -> str:
     """The launchd label for a target.
 
@@ -88,6 +98,7 @@ def build_plist(
     cooldown: Optional[int],
     context_command: Optional[str],
     signal_name: Optional[str] = None,
+    history_ceiling: Optional[str] = None,
 ) -> Dict[str, object]:
     arguments: List[str] = [executable, "--process", process, "--ceiling", ceiling]
     if cooldown is not None:
@@ -96,6 +107,8 @@ def build_plist(
         arguments += ["--context-command", context_command]
     if signal_name is not None:
         arguments += ["--signal", signal_name]
+    if history_ceiling is not None:
+        arguments += ["--history-ceiling", history_ceiling]
     return {
         "Label": label_for(process),
         "ProgramArguments": arguments,
@@ -294,6 +307,7 @@ def do_install(args: argparse.Namespace) -> int:
         cooldown=args.cooldown,
         context_command=args.context_command,
         signal_name=args.signal,
+        history_ceiling=args.history_ceiling,
     )
     require_root_only_path(LAUNCH_DAEMONS, "write a LaunchDaemon into")
     require_root_only_log(str(args.log))
@@ -381,6 +395,7 @@ def verify_problems(args: argparse.Namespace) -> List[Tuple[str, str]]:
             cooldown=args.cooldown,
             context_command=args.context_command,
             signal_name=args.signal,
+            history_ceiling=args.history_ceiling,
         )
         if installed != expected:
             problems.append(("launchdaemon_differs", plist_path))
@@ -451,6 +466,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--signal",
         choices=("TERM", "KILL"),
         help="Signal to send (watchdog default: TERM).",
+    )
+    parser.add_argument(
+        "--history-ceiling",
+        type=history_ceiling_string,
+        metavar="SIZE|off",
+        help=(
+            "Purge the Data volume's FSEvents history above this size "
+            "(watchdog default: %s for %s, off otherwise)."
+            % (fw.DEFAULT_HISTORY_CEILING, fw.HISTORY_DEFAULT_PROCESS)
+        ),
     )
     parser.add_argument("--log", default=DEFAULT_LOG, help="Log path (default: %(default)s).")
     parser.add_argument("--prefix", default=DEFAULT_PREFIX, help="Install directory (default: %(default)s).")
