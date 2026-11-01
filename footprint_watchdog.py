@@ -846,9 +846,16 @@ def first_failure(*codes: int) -> int:
     return EXIT_OK
 
 
+# UTC, in the one form `log show --start` and `--end` accept with a zone, so a
+# record's time can be pasted into them to read what the OS logged around it.
+RECORD_TIME_FORMAT = "%Y-%m-%d %H:%M:%S+0000"
+
+
 def emit(record: Dict[str, object], stream: TextIO) -> None:
     """One event, one line of JSON. Callers emit nothing on the quiet path."""
-    stream.write(json.dumps(record, sort_keys=True) + "\n")
+    stamped = dict(record)
+    stamped["time"] = time.strftime(RECORD_TIME_FORMAT, time.gmtime())
+    stream.write(json.dumps(stamped, sort_keys=True) + "\n")
     stream.flush()
 
 
