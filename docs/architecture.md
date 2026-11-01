@@ -209,6 +209,62 @@ can overlap. An exclusive `flock` on a per-target lock file means whichever tick
 holds it is the one acting; the loser exits silently rather than sending a
 second signal at a process that is already being replaced.
 
+## The event history
+
+`fseventsd` has a second unbounded growth that a restart does not address: the
+change history it persists on the Data volume. Its cost is not the disk it
+takes but the reads it invites. A client that asks for events since an early
+ID makes `fseventsd` read the history back from that point, so a client that
+does it on every launch, launched often, holds `fseventsd` near a full core for
+as long as the history is long.
+
+**Bounded by size, never by age or on a timer.** Every purge that drops anything
+gives the volume's event store a new UUID, and a client that follows Apple's
+FSEvents contract treats an event ID from an earlier UUID as lost history and
+rescans. A timed purge would impose that on every such client on every healthy
+machine, every interval. Above a measured ceiling only, the store changes
+identity only when its size has become the problem. The cooldown is stamped
+before the purge for the same reason it is stamped before a restart: a history
+that refills past the ceiling within it is reported, not purged in a loop.
+
+**Purged through the newest event on disk, not to a window.** History kept
+behind a purge serves no client that honours the UUID change, so keeping a
+window would cost purges sooner and buy nothing; purging all of it leaves the
+most room, and so the longest time until the next UUID change. The newest event
+on disk rather than the current event ID, because `fseventsd` refused a purge to
+the current ID when that event was not yet in a journal file. That leaves the newest
+journal file in place, which is why one purge can leave a small history above a
+very small ceiling, and why exit code 11 exists.
+
+**The lookup takes Unix time.** `FSEventsGetLastEventIdForDeviceBeforeTime` is
+declared with a `CFAbsoluteTime` (seconds since 2001), but `fseventsd` compares
+the value with Unix time. Given a `CFAbsoluteTime`, even one in the future, it
+logs `requested timestamp is prior to the earliest log file` and answers 0.
+
+**Not the `no_log` marker.** Apple's per-volume marker stops the history at the
+source, and on a machine without Time Machine it is the simpler answer. On
+macOS 26 with the marker in effect on the Data volume, every Time Machine backup
+fails in preflight for want of an event store, so the marker cannot be the
+general fix. A volume that carries it is the owner's choice, not a history to
+bound: the tick reads it as history switched off and stays silent, which is
+what lets a fleet that turns history off on its CI machines run the same
+watchdog everywhere.
+
+**A default, unlike the memory ceiling.** The memory ceiling has none because a
+wrong one either never fires or restarts something healthy, and the right one
+depends on the host. For the history the observed gap between healthy and
+failing is wide enough - MiB against past ten GiB - that 1 GiB is far from both
+on any machine, and leaving it off by default would leave every installed
+`fseventsd` watchdog blind to the failure most likely to bring someone here.
+Every other target gets no history check unless asked: another daemon's history
+is not this tool's to purge.
+
+**The volume must be a mount point.** The purge acts on the device a path is on,
+so a path inside a volume names the whole volume. `os.path.ismount` cannot be
+the check: it compares a path's device with its parent's, and firmlinks give
+`/System/Volumes` the Data volume's device, so it reports the default volume as
+not a mount point. `statfs` reports each path's actual mount point.
+
 ## Silence as a design property
 
 Below the ceiling the tool writes nothing at all - not a heartbeat, not a

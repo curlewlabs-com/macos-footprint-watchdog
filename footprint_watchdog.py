@@ -5,6 +5,11 @@ One tick: measure one process's `phys_footprint`, and if it is above a ceiling,
 signal it and verify that its supervisor (launchd, for a system daemon) replaced
 it with a healthy one. Below the ceiling it exits silently and writes nothing.
 
+For `fseventsd` a tick also bounds the daemon's other unbounded growth: the
+event history it persists on the Data volume. Above a history ceiling it asks
+`fseventsd` to purge that history; `run_history_tick` says why, and
+DEFAULT_HISTORY_CEILING why that is on by default.
+
 Shape: this checks once and exits. launchd owns the cadence via `StartInterval`,
 because a watchdog that is itself a long-lived process can become the thing that
 needs watching - and the daemons this exists to catch are ones that grew
@@ -58,11 +63,21 @@ EXIT_COOLDOWN_SUPPRESSED = 6
 EXIT_RESPAWN_FAILED = 7
 EXIT_REPLACEMENT_ABOVE_CEILING = 8
 EXIT_UNSAFE_PATH = 9
+EXIT_HISTORY_PURGE_FAILED = 10
+EXIT_HISTORY_ABOVE_CEILING = 11
 
 DEFAULT_STATE_DIR = "/var/db/footprint-watchdog"
 DEFAULT_COOLDOWN_SECONDS = 3600
 DEFAULT_RESPAWN_TIMEOUT_SECONDS = 60
 DEFAULT_RESPAWN_POLL_SECONDS = 0.5
+DEFAULT_HISTORY_VOLUME = "/System/Volumes/Data"
+# Applied when the target is fseventsd and the operator names no history
+# ceiling. A healthy history on a busy build machine measures in MiB; the ones
+# that made fseventsd hold a core replaying them ran past ten GiB. A gibibyte
+# sits far from both, which is what makes a default defensible here when the
+# memory ceiling has none.
+HISTORY_DEFAULT_PROCESS = "fseventsd"
+DEFAULT_HISTORY_CEILING = "1GiB"
 
 _PROC_ALL_PIDS = 1
 _PROC_PIDPATHINFO_MAXSIZE = 4096
@@ -120,6 +135,70 @@ def _load_libsystem() -> ctypes.CDLL:
 
 
 _LIB = _load_libsystem()
+
+
+def _load_core_services() -> ctypes.CDLL:
+    lib = ctypes.CDLL("/System/Library/Frameworks/CoreServices.framework/CoreServices")
+    lib.FSEventsGetLastEventIdForDeviceBeforeTime.argtypes = [ctypes.c_int32, ctypes.c_double]
+    lib.FSEventsGetLastEventIdForDeviceBeforeTime.restype = ctypes.c_uint64
+    lib.FSEventsPurgeEventsForDeviceUpToEventId.argtypes = [ctypes.c_int32, ctypes.c_uint64]
+    lib.FSEventsPurgeEventsForDeviceUpToEventId.restype = ctypes.c_ubyte
+    lib.FSEventsCopyUUIDForDevice.argtypes = [ctypes.c_int32]
+    lib.FSEventsCopyUUIDForDevice.restype = ctypes.c_void_p
+    return lib
+
+
+def _load_core_foundation() -> ctypes.CDLL:
+    lib = ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+    lib.CFUUIDCreateString.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    lib.CFUUIDCreateString.restype = ctypes.c_void_p
+    lib.CFStringGetCString.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_long, ctypes.c_uint32]
+    lib.CFStringGetCString.restype = ctypes.c_ubyte
+    lib.CFRelease.argtypes = [ctypes.c_void_p]
+    lib.CFRelease.restype = None
+    return lib
+
+
+class _Statfs(ctypes.Structure):
+    # struct statfs with 64-bit inodes, from <sys/mount.h>.
+    _fields_ = [
+        ("f_bsize", ctypes.c_uint32),
+        ("f_iosize", ctypes.c_int32),
+        ("f_blocks", ctypes.c_uint64),
+        ("f_bfree", ctypes.c_uint64),
+        ("f_bavail", ctypes.c_uint64),
+        ("f_files", ctypes.c_uint64),
+        ("f_ffree", ctypes.c_uint64),
+        ("f_fsid", ctypes.c_int32 * 2),
+        ("f_owner", ctypes.c_uint32),
+        ("f_type", ctypes.c_uint32),
+        ("f_flags", ctypes.c_uint32),
+        ("f_fssubtype", ctypes.c_uint32),
+        ("f_fstypename", ctypes.c_char * 16),
+        ("f_mntonname", ctypes.c_char * 1024),
+        ("f_mntfromname", ctypes.c_char * 1024),
+        ("f_flags_ext", ctypes.c_uint32),
+        ("f_reserved", ctypes.c_uint32 * 7),
+    ]
+
+
+def _load_statfs() -> Callable[..., int]:
+    # <sys/cdefs.h> versions the 64-bit-inode layout as `statfs$INODE64` where
+    # an older layout also exists (Intel), and as the bare name where it is the
+    # only one (Apple silicon, which exports no suffixed symbol).
+    try:
+        function = getattr(_LIB, "statfs$INODE64")
+    except AttributeError:
+        function = _LIB.statfs
+    function.argtypes = [ctypes.c_char_p, ctypes.POINTER(_Statfs)]
+    function.restype = ctypes.c_int
+    return cast(Callable[..., int], function)
+
+
+_STATFS = _load_statfs()
+_CORE_SERVICES = _load_core_services()
+_CORE_FOUNDATION = _load_core_foundation()
+_CF_STRING_ENCODING_UTF8 = 0x08000100
 
 
 class Sample:
@@ -467,6 +546,254 @@ def cooldown_remaining(
     return max(0.0, cooldown_seconds - elapsed)
 
 
+class HistorySample:
+    """One volume's persisted FSEvents history at one instant.
+
+    `uuid` names the event store. Every purge that drops anything gives the store
+    a new one, which is what tells a client its saved event ID no longer applies,
+    so the record carries it before and after.
+    """
+
+    def __init__(self, history_bytes: int, files: int, uuid: Optional[str]) -> None:
+        self.history_bytes = history_bytes
+        self.files = files
+        self.uuid = uuid
+
+    def as_record(self) -> Dict[str, object]:
+        return {
+            "history_bytes": self.history_bytes,
+            "history_human": human_bytes(self.history_bytes),
+            "files": self.files,
+            "uuid": self.uuid,
+        }
+
+
+def resolve_history_ceiling(process: str, text: Optional[str]) -> Optional[int]:
+    """The history ceiling a tick enforces, or None when it bounds no history.
+
+    Unset means the default for fseventsd and off for anything else: no other
+    daemon's history is this tool's to purge.
+    """
+    if text is None:
+        if os.path.basename(canonical_spec(process)) != HISTORY_DEFAULT_PROCESS:
+            return None
+        text = DEFAULT_HISTORY_CEILING
+    if text.strip().lower() == "off":
+        return None
+    return parse_size(text)
+
+
+def mount_point(path: str) -> Optional[str]:
+    """The mount point of the volume `path` is on, or None if statfs fails.
+
+    Not `os.path.ismount`: it compares a path's device with its parent's, and
+    on macOS firmlinks give `/System/Volumes` the Data volume's device, so the
+    Data volume's own mount point reads as not a mount point.
+    """
+    info = _Statfs()
+    if _STATFS(path.encode(), ctypes.byref(info)) != 0:
+        return None
+    return info.f_mntonname.decode()
+
+
+def history_uuid(device: int) -> Optional[str]:
+    reference = cast(Optional[int], _CORE_SERVICES.FSEventsCopyUUIDForDevice(device))
+    if not reference:
+        return None
+    text = cast(Optional[int], _CORE_FOUNDATION.CFUUIDCreateString(None, reference))
+    _CORE_FOUNDATION.CFRelease(reference)
+    if not text:
+        return None
+    buffer = ctypes.create_string_buffer(64)
+    converted = bool(_CORE_FOUNDATION.CFStringGetCString(text, buffer, len(buffer), _CF_STRING_ENCODING_UTF8))
+    _CORE_FOUNDATION.CFRelease(text)
+    return buffer.value.decode("ascii") if converted else None
+
+
+def read_history(volume: str) -> Optional[HistorySample]:
+    """The volume's persisted history, or None when it keeps none.
+
+    A volume with no `.fseventsd`, or with Apple's per-volume `no_log` marker in
+    it, has recording switched off by its owner; that is a configuration, not a
+    history to bound, so it reads as nothing rather than as an error. A CI guest
+    that turns its history off runs this same tick every interval.
+    """
+    directory = os.path.join(volume, ".fseventsd")
+    try:
+        entries = list(os.scandir(directory))
+    except FileNotFoundError:
+        return None
+    if any(entry.name == "no_log" for entry in entries):
+        return None
+    total = 0
+    files = 0
+    for entry in entries:
+        if entry.is_file(follow_symlinks=False):
+            total += entry.stat(follow_symlinks=False).st_size
+            files += 1
+    return HistorySample(total, files, history_uuid(os.stat(volume).st_dev))
+
+
+def purge_history(volume: str, now_epoch: float) -> Tuple[int, bool]:
+    """Ask fseventsd to drop the volume's history through its newest event on
+    disk. Returns that event ID (0 when there was none) and whether the purge
+    call succeeded.
+
+    Through the newest event rather than through some window: every purge gives
+    the store a new UUID, and a client following Apple's FSEvents contract
+    discards an event ID from an earlier UUID, so history kept behind a purge
+    serves no such client. Purging all of it leaves the most room under the
+    ceiling, and so the longest time until the next purge rotates the UUID
+    again.
+
+    Through the newest event on disk rather than the current event ID:
+    fseventsd refused a purge to the current ID when that event was not yet in
+    a journal file.
+    """
+    device = os.stat(volume).st_dev
+    # FSEvents.h types this time as a CFAbsoluteTime, but fseventsd compares it
+    # with Unix time: given a CFAbsoluteTime, even one in the future, it logs
+    # "requested timestamp is prior to the earliest log file" and answers 0.
+    event_id = int(_CORE_SERVICES.FSEventsGetLastEventIdForDeviceBeforeTime(device, now_epoch))
+    if event_id == 0:
+        return 0, False
+    return event_id, bool(_CORE_SERVICES.FSEventsPurgeEventsForDeviceUpToEventId(device, event_id))
+
+
+def run_history_tick(
+    volume: str,
+    ceiling: int,
+    cooldown_seconds: float,
+    state_path: Optional[str],
+    dry_run: bool,
+    now_fn: Callable[[], float],
+    out: TextIO,
+) -> int:
+    """Bound the persisted FSEvents history of `volume`, the way run_tick bounds
+    a process's footprint.
+
+    fseventsd keeps every change on a volume, and on a machine with heavy file
+    churn the history runs to days and gigabytes. That costs nothing until a
+    client asks for events since an early ID, which makes fseventsd read the
+    whole history back - and a client that does so on every
+    launch, launched often, holds a core in fseventsd indefinitely. The no_log
+    marker stops the growth but cannot be the fix on a machine with Time
+    Machine: with it in effect on the Data volume, every backup fails in
+    preflight for want of an event store.
+
+    So a purge happens only above a measured ceiling, never on a timer: each one
+    gives the store a new UUID, and every client that saved an event ID rescans
+    instead of reading the history. The cooldown is stamped before the purge, as
+    the restart's is before the signal, so a history that refills past the
+    ceiling within it is reported rather than purged in a loop.
+    """
+    if mount_point(volume) != os.path.realpath(volume):
+        # The purge acts on the device a path is on. A path that is not a mount
+        # point would name whichever volume contains it, which for a typo is the
+        # Data volume itself.
+        emit({"event": "history_volume_not_mounted", "volume": volume}, out)
+        return EXIT_USAGE
+    try:
+        sample = read_history(volume)
+    except PermissionError as exc:
+        emit({"event": "history_unreadable", "volume": volume, "reason": str(exc)}, out)
+        return EXIT_NOT_ROOT
+    if sample is None or sample.history_bytes <= ceiling:
+        return EXIT_OK
+
+    now_epoch = now_fn()
+    state = read_state(state_path) if state_path is not None else {}
+    last_purge = state.get("last_history_purge_epoch")
+    remaining = cooldown_remaining(
+        float(last_purge) if isinstance(last_purge, (int, float)) else None,
+        now_epoch,
+        cooldown_seconds,
+    )
+    if remaining > 0:
+        emit(
+            {
+                "event": "history_cooldown_suppressed",
+                "volume": volume,
+                "history_ceiling_bytes": ceiling,
+                "cooldown_remaining_seconds": round(remaining, 1),
+                "before": sample.as_record(),
+            },
+            out,
+        )
+        return EXIT_COOLDOWN_SUPPRESSED
+
+    emit(
+        {
+            "event": "history_ceiling_crossed",
+            "volume": volume,
+            "history_ceiling_bytes": ceiling,
+            "history_ceiling_human": human_bytes(ceiling),
+            "dry_run": dry_run,
+            "before": sample.as_record(),
+        },
+        out,
+    )
+    if dry_run:
+        return EXIT_OK
+
+    if state_path is not None:
+        state["last_history_purge_epoch"] = now_epoch
+        state["last_history_purge_bytes"] = sample.history_bytes
+        try:
+            write_state(state_path, state)
+        except OSError as exc:
+            emit(
+                {
+                    "event": "cooldown_stamp_failed",
+                    "path": state_path,
+                    "reason": "%s; refusing to purge without a durable cooldown" % exc,
+                },
+                out,
+            )
+            return EXIT_UNSAFE_PATH
+
+    event_id, purged = purge_history(volume, now_epoch)
+    if not purged:
+        emit(
+            {
+                "event": "history_purge_failed",
+                "volume": volume,
+                "event_id": hex(event_id),
+                "reason": "no event on disk to purge through" if event_id == 0 else "fseventsd refused the purge",
+            },
+            out,
+        )
+        return EXIT_HISTORY_PURGE_FAILED
+
+    after = read_history(volume)
+    after_record = after.as_record() if after is not None else None
+    if after is not None and after.history_bytes > ceiling:
+        emit(
+            {
+                "event": "history_above_ceiling_after_purge",
+                "volume": volume,
+                "history_ceiling_bytes": ceiling,
+                "purged_through_event_id": hex(event_id),
+                "after": after_record,
+            },
+            out,
+        )
+        return EXIT_HISTORY_ABOVE_CEILING
+
+    emit(
+        {
+            "event": "history_purged",
+            "volume": volume,
+            "history_ceiling_bytes": ceiling,
+            "purged_through_event_id": hex(event_id),
+            "before": sample.as_record(),
+            "after": after_record,
+        },
+        out,
+    )
+    return EXIT_OK
+
+
 def wait_for_replacement(
     spec: str,
     old_pid: int,
@@ -507,6 +834,16 @@ def wait_for_replacement(
                 return (None, "several processes match, so no single replacement")
             return (None, "nothing matches the target")
         sleep_fn(poll_seconds)
+
+
+def first_failure(*codes: int) -> int:
+    """The tick's exit code when it ran more than one check: the first that
+    did not succeed, so neither check's failure hides behind the other's
+    success."""
+    for code in codes:
+        if code != EXIT_OK:
+            return code
+    return EXIT_OK
 
 
 def emit(record: Dict[str, object], stream: TextIO) -> None:
@@ -580,9 +917,24 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--history-ceiling",
+        metavar="SIZE|off",
+        help=(
+            "Purge --history-volume's persisted FSEvents history above this size. "
+            "Default: %s when the target is %s, off otherwise."
+            % (DEFAULT_HISTORY_CEILING, HISTORY_DEFAULT_PROCESS)
+        ),
+    )
+    parser.add_argument(
+        "--history-volume",
+        default=DEFAULT_HISTORY_VOLUME,
+        metavar="PATH",
+        help="Mount point whose history --history-ceiling bounds (default: %(default)s).",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Measure and report a crossing, but never signal anything.",
+        help="Measure and report a crossing, but never signal or purge anything.",
     )
     return parser
 
@@ -601,15 +953,23 @@ def main(
     except ValueError as exc:
         parser.error(str(exc))
 
+    try:
+        history_ceiling = resolve_history_ceiling(
+            str(args.process), cast(Optional[str], args.history_ceiling)
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
+
     spec = str(args.process)
     dry_run = bool(args.dry_run)
+    history_volume = str(args.history_volume)
 
     # A dry run only reads, so it takes no lock, keeps no state, and is exempt
     # from both the root requirement and the cooldown. That is what makes it
     # usable for the job it exists for - watching a candidate ceiling against a
     # live process before arming anything - and running it can change nothing.
     if dry_run:
-        return run_tick(
+        code = run_tick(
             spec=spec,
             ceiling=ceiling,
             cooldown_seconds=0.0,
@@ -621,6 +981,20 @@ def main(
             now_fn=now_fn,
             sleep_fn=sleep_fn,
             out=out,
+        )
+        if history_ceiling is None:
+            return code
+        return first_failure(
+            code,
+            run_history_tick(
+                volume=history_volume,
+                ceiling=history_ceiling,
+                cooldown_seconds=0.0,
+                state_path=None,
+                dry_run=True,
+                now_fn=now_fn,
+                out=out,
+            ),
         )
 
     # Root is required to read another process's ledger (proc_pid_rusage returns
@@ -673,7 +1047,7 @@ def main(
             return EXIT_OK
         raise
     try:
-        return run_tick(
+        code = run_tick(
             spec=spec,
             ceiling=ceiling,
             cooldown_seconds=float(args.cooldown),
@@ -685,6 +1059,23 @@ def main(
             now_fn=now_fn,
             sleep_fn=sleep_fn,
             out=out,
+        )
+        if history_ceiling is None:
+            return code
+        # After the process tick and independent of its outcome: a history
+        # past its ceiling needs bounding whether or not the daemon itself
+        # was found, measured, or restarted this tick.
+        return first_failure(
+            code,
+            run_history_tick(
+                volume=history_volume,
+                ceiling=history_ceiling,
+                cooldown_seconds=float(args.cooldown),
+                state_path=state_path,
+                dry_run=dry_run,
+                now_fn=now_fn,
+                out=out,
+            ),
         )
     finally:
         fcntl.flock(lock_fd, fcntl.LOCK_UN)

@@ -47,3 +47,8 @@ jobs:
       # Line Tools that are preinstalled on these images.
       - name: unit and integration tests
         run: /usr/bin/python3 -m unittest discover -s test -v
+      # The history purge cases skip in the run above: attaching a volume that
+      # fseventsd records, and calling the purge, both need root. They purge
+      # only the disk image they attach, never the runner's own volumes.
+      - name: FSEvents history tests (root)
+        run: sudo /usr/bin/python3 -m unittest discover -s test -p 'test_fsevents_history.py' -v
