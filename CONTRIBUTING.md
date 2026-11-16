@@ -21,8 +21,11 @@ These are the same checks CI runs on every push and PR:
 ```sh
 /usr/bin/python3 -m unittest discover -s test -v   # macOS, needs cc
 sudo /usr/bin/python3 -m unittest discover -s test -p 'test_fsevents_history.py' -v
-npx pyright@1.1.409                                # strict; runs anywhere
+npx pyright@<version>                              # strict; runs anywhere
 ```
+
+`<version>` is the pyright release `.github/workflows/ci.yml` pins; another
+release can report different errors than CI does.
 
 The second line runs the FSEvents history cases, which need root and skip in
 the first. They purge only a disk image they attach themselves.
@@ -47,7 +50,8 @@ kernel ledger. The type check runs anywhere - `pyrightconfig.json` pins
   installer generates are arguments the watchdog's own parser accepts.
 - **Pin dependencies exactly.** The `pyright` pin and the action pins in CI are
   exact versions so a resolver cannot silently move them. Match that when
-  adding any.
+  adding any. Renovate proposes their updates; the `# renovate:` comment above
+  an inline pin tells it what the literal is, so a new inline pin needs one.
 - **Comments explain _why_, not _what_.** Most of the non-obvious code here is
   non-obvious for a reason that was measured (why not RSS, why not `vmmap`, why
   the mach timebase conversion is not optional). Keep the reason with the code.

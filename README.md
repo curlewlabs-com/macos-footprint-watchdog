@@ -298,8 +298,11 @@ with `--ceiling 1 --dry-run` and look at the `path` field.
 ```sh
 /usr/bin/python3 -m unittest discover -s test -v   # needs macOS and cc
 sudo /usr/bin/python3 -m unittest discover -s test -p 'test_fsevents_history.py' -v
-npx pyright@1.1.409                                # strict, runs anywhere
+npx pyright@<version>                              # strict, runs anywhere
 ```
+
+Use the pyright release `.github/workflows/ci.yml` pins; another release can
+report different errors than CI does.
 
 The history purge cases need root and skip without it. They attach a small APFS
 disk image, churn files on it until `fseventsd` has written journals, and purge
