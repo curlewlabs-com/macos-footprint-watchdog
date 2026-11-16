@@ -23,10 +23,12 @@ jobs:
       - uses: actions/checkout@v7.0.1
       - uses: actions/setup-node@v7.1.0
         with:
+          # renovate: datasource=node-version depName=node
           node-version: 24.14.0
       # Type checking is platform-independent: pyrightconfig.json pins
       # pythonPlatform to Darwin, so the macOS-only stdlib calls resolve here.
       - name: pyright (strict)
+        # renovate: datasource=npm depName=pyright
         run: npx --yes pyright@1.1.409
 
   test:
