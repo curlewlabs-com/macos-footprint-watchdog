@@ -589,15 +589,18 @@ class RunTickTest(unittest.TestCase):
         self.assertEqual(events, ["ceiling_crossed", "replacement_above_ceiling"])
 
     def test_cooldown_suppresses_a_second_restart(self) -> None:
-        target = TargetProcess(mib=64, respawn_mib=64)
+        # The ceiling is below any process for the reason the case above gives.
+        # The tick measures a replacement the moment it appears, so against a
+        # ceiling the replacement only crosses once its allocation is dirtied,
+        # whether the first tick saw it above would turn on how long before a
+        # poll the supervisor happened to respawn it.
+        target = TargetProcess(mib=8, respawn_mib=8)
         self.addCleanup(target.close)
-        self.assertEqual(
-            self.tick(ceiling=32 * 1024**2), fw.EXIT_REPLACEMENT_ABOVE_CEILING
-        )
+        self.assertEqual(self.tick(ceiling=1), fw.EXIT_REPLACEMENT_ABOVE_CEILING)
         surviving = target.pids()
 
         self.out = io.StringIO()
-        self.assertEqual(self.tick(ceiling=32 * 1024**2), fw.EXIT_COOLDOWN_SUPPRESSED)
+        self.assertEqual(self.tick(ceiling=1), fw.EXIT_COOLDOWN_SUPPRESSED)
         self.assertEqual(self.only_record()["event"], "cooldown_suppressed")
         self.assertEqual(target.pids(), surviving)
 
