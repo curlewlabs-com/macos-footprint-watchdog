@@ -23,7 +23,7 @@ import stat
 import subprocess
 import sys
 import tempfile
-from typing import Dict, List, Optional, Tuple, cast
+from typing import cast
 from xml.parsers.expat import ExpatError
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -60,7 +60,7 @@ def ceiling_string(text: str) -> str:
     try:
         fw.parse_size(text)
     except ValueError as exc:
-        raise argparse.ArgumentTypeError(str(exc))
+        raise argparse.ArgumentTypeError(str(exc)) from exc
     return text
 
 
@@ -70,7 +70,7 @@ def history_ceiling_string(text: str) -> str:
     try:
         fw.resolve_history_ceiling(fw.HISTORY_DEFAULT_PROCESS, text)
     except ValueError as exc:
-        raise argparse.ArgumentTypeError(str(exc))
+        raise argparse.ArgumentTypeError(str(exc)) from exc
     return text
 
 
@@ -82,7 +82,7 @@ def label_for(process: str) -> str:
     instead would let two different targets collide onto one label - and one
     install would then overwrite the other's job file.
     """
-    return "%s.%s" % (LABEL_PREFIX, fw.target_key(process))
+    return f"{LABEL_PREFIX}.{fw.target_key(process)}"
 
 
 def plist_path_for(process: str) -> str:
@@ -95,12 +95,12 @@ def build_plist(
     interval: int,
     executable: str,
     log_path: str,
-    cooldown: Optional[int],
-    context_command: Optional[str],
-    signal_name: Optional[str] = None,
-    history_ceiling: Optional[str] = None,
-) -> Dict[str, object]:
-    arguments: List[str] = [executable, "--process", process, "--ceiling", ceiling]
+    cooldown: int | None,
+    context_command: str | None,
+    signal_name: str | None = None,
+    history_ceiling: str | None = None,
+) -> dict[str, object]:
+    arguments: list[str] = [executable, "--process", process, "--ceiling", ceiling]
     if cooldown is not None:
         arguments += ["--cooldown", str(cooldown)]
     if context_command is not None:
@@ -129,7 +129,9 @@ def build_plist(
 
 def require_root() -> None:
     if os.geteuid() != 0:
-        sys.stderr.write("must run as root (writes %s and %s)\n" % (DEFAULT_PREFIX, LAUNCH_DAEMONS))
+        sys.stderr.write(
+            f"must run as root (writes {DEFAULT_PREFIX} and {LAUNCH_DAEMONS})\n"
+        )
         raise SystemExit(2)
 
 
@@ -161,8 +163,8 @@ def require_root_only_log(log_path: str) -> None:
     directory = os.path.dirname(log_path) or "/"
     if not os.path.isdir(directory):
         sys.stderr.write(
-            "refusing to log to %s: %s is not an existing directory, so launchd "
-            "would silently discard every record\n" % (log_path, directory)
+            f"refusing to log to {log_path}: {directory} is not an existing directory, so launchd "
+            "would silently discard every record\n"
         )
         raise SystemExit(2)
     require_root_only_path(directory, "write a log into")
@@ -170,19 +172,17 @@ def require_root_only_log(log_path: str) -> None:
         return
     info = os.lstat(log_path)
     if stat.S_ISLNK(info.st_mode):
-        sys.stderr.write("refusing to log to %s: it is a symlink\n" % log_path)
+        sys.stderr.write(f"refusing to log to {log_path}: it is a symlink\n")
         raise SystemExit(2)
     if not stat.S_ISREG(info.st_mode):
         # A fifo or device here is not a redirect but it is still not a log:
         # root blocks on an unread fifo, taking the watchdog down with it.
-        sys.stderr.write(
-            "refusing to log to %s: not a regular file\n" % log_path
-        )
+        sys.stderr.write(f"refusing to log to {log_path}: not a regular file\n")
         raise SystemExit(2)
     if info.st_uid != 0 or (info.st_mode & 0o022):
         sys.stderr.write(
-            "refusing to log to %s: not root-owned, or writable by a non-root "
-            "account\n" % log_path
+            f"refusing to log to {log_path}: not root-owned, or writable by a non-root "
+            "account\n"
         )
         raise SystemExit(2)
 
@@ -191,25 +191,33 @@ def require_root_only_path(path: str, action: str) -> None:
     unsafe = fw.unsafe_path_owners(path)
     if unsafe:
         sys.stderr.write(
-            "refusing to %s %s: %s %s not root-owned, or writable by a non-root "
-            "account, so that account chooses what root executes\n"
-            % (action, path, ", ".join(unsafe), "is" if len(unsafe) == 1 else "are")
+            "refusing to {} {}: {} {} not root-owned, or writable by a non-root "
+            "account, so that account chooses what root executes\n".format(
+                action, path, ", ".join(unsafe), "is" if len(unsafe) == 1 else "are"
+            )
         )
         raise SystemExit(2)
 
 
 def check_interpreter() -> None:
     try:
-        subprocess.run([INTERPRETER, "-c", "import ctypes"], check=True, capture_output=True, timeout=60)
+        subprocess.run(
+            [INTERPRETER, "-c", "import ctypes"],
+            check=True,
+            capture_output=True,
+            timeout=60,
+        )
     except (OSError, subprocess.SubprocessError) as exc:
         sys.stderr.write(
-            "%s is not usable (%s). Install the Command Line Tools: "
-            "xcode-select --install\n" % (INTERPRETER, exc)
+            f"{INTERPRETER} is not usable ({exc}). Install the Command Line Tools: "
+            "xcode-select --install\n"
         )
-        raise SystemExit(2)
+        raise SystemExit(2) from exc
 
 
-def write_plist(target_path: str, contents: Dict[str, object], mode: int = 0o644) -> None:
+def write_plist(
+    target_path: str, contents: dict[str, object], mode: int = 0o644
+) -> None:
     """Write a plist atomically, with the ownership and mode launchd requires.
 
     No explicit chown: launchd refuses a job file that is not root-owned or that
@@ -241,9 +249,8 @@ def install_executable(source: str, destination: str) -> None:
     """
     handle, temp_path = tempfile.mkstemp(dir=os.path.dirname(destination))
     try:
-        with os.fdopen(handle, "wb") as target:
-            with open(source, "rb") as stream:
-                shutil.copyfileobj(stream, target)
+        with os.fdopen(handle, "wb") as target, open(source, "rb") as stream:
+            shutil.copyfileobj(stream, target)
         os.chmod(temp_path, 0o755)
     except OSError:
         os.unlink(temp_path)
@@ -251,9 +258,9 @@ def install_executable(source: str, destination: str) -> None:
     os.replace(temp_path, destination)
 
 
-def plists_referencing(executable: str) -> List[str]:
+def plists_referencing(executable: str) -> list[str]:
     """Installed job files whose ProgramArguments start with this executable."""
-    referencing: List[str] = []
+    referencing: list[str] = []
     try:
         names = sorted(os.listdir(LAUNCH_DAEMONS))
     except OSError:
@@ -273,15 +280,25 @@ def plists_referencing(executable: str) -> List[str]:
         arguments = cast(object, contents.get("ProgramArguments"))
         if not isinstance(arguments, list) or not arguments:
             continue
-        if str(cast(List[object], arguments)[0]) == executable:
+        if str(cast(list[object], arguments)[0]) == executable:
             referencing.append(path)
     return referencing
 
 
-def launchctl(arguments: List[str], check: bool) -> int:
-    result = subprocess.run(["/bin/launchctl"] + arguments, capture_output=True, text=True, timeout=120)
+def launchctl(arguments: list[str], check: bool) -> int:
+    result = subprocess.run(
+        ["/bin/launchctl"] + arguments,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
     if result.returncode != 0 and check:
-        sys.stderr.write("launchctl %s failed: %s\n" % (" ".join(arguments), result.stderr.strip()))
+        sys.stderr.write(
+            "launchctl {} failed: {}\n".format(
+                " ".join(arguments), result.stderr.strip()
+            )
+        )
         raise SystemExit(1)
     return result.returncode
 
@@ -294,7 +311,7 @@ def do_install(args: argparse.Namespace) -> int:
 
     executable = os.path.join(prefix, INSTALLED_NAME)
     install_executable(os.path.join(REPO_ROOT, SOURCE_NAME), executable)
-    print("installed %s" % executable)
+    print(f"installed {executable}")
 
     label = label_for(str(args.process))
     plist_path = plist_path_for(str(args.process))
@@ -312,18 +329,18 @@ def do_install(args: argparse.Namespace) -> int:
     require_root_only_path(LAUNCH_DAEMONS, "write a LaunchDaemon into")
     require_root_only_log(str(args.log))
     write_plist(plist_path, contents)
-    print("installed %s" % plist_path)
+    print(f"installed {plist_path}")
 
     # bootout first so a re-run picks up a changed plist: bootstrap alone leaves
     # an already-loaded job running under its previous definition.
     launchctl(["bootout", "system/" + label], check=False)
     launchctl(["bootstrap", "system", plist_path], check=True)
-    print("loaded %s" % label)
-    print("\nWatch it with:  tail -f %s" % args.log)
+    print(f"loaded {label}")
+    print(f"\nWatch it with:  tail -f {args.log}")
     return 0
 
 
-def verify_problems(args: argparse.Namespace) -> List[Tuple[str, str]]:
+def verify_problems(args: argparse.Namespace) -> list[tuple[str, str]]:
     """Every way the installed state differs from the tracked sources.
 
     Returns (code, detail) pairs. The code is the stable half - it is what a
@@ -336,7 +353,7 @@ def verify_problems(args: argparse.Namespace) -> List[Tuple[str, str]]:
     """
     executable = os.path.join(str(args.prefix), INSTALLED_NAME)
     plist_path = plist_path_for(str(args.process))
-    problems: List[Tuple[str, str]] = []
+    problems: list[tuple[str, str]] = []
 
     for component in fw.unsafe_path_owners(os.path.dirname(executable)):
         problems.append(("executable_dir_unsafe", component))
@@ -353,7 +370,7 @@ def verify_problems(args: argparse.Namespace) -> List[Tuple[str, str]]:
         except OSError as exc:
             # A verifier that raises where it promised a drift record turns a
             # config-management check into a traceback nobody can act on.
-            problems.append(("executable_unreadable", "%s (%s)" % (executable, exc)))
+            problems.append(("executable_unreadable", f"{executable} ({exc})"))
             matches = True
         if not matches:
             problems.append(("executable_content_differs", executable))
@@ -384,7 +401,7 @@ def verify_problems(args: argparse.Namespace) -> List[Tuple[str, str]]:
             with open(plist_path, "rb") as stream:
                 installed = cast(object, plistlib.load(stream))
         except PLIST_READ_ERRORS as exc:
-            problems.append(("launchdaemon_unreadable", "%s (%s)" % (plist_path, exc)))
+            problems.append(("launchdaemon_unreadable", f"{plist_path} ({exc})"))
             return problems
         expected = build_plist(
             process=str(args.process),
@@ -405,7 +422,7 @@ def verify_problems(args: argparse.Namespace) -> List[Tuple[str, str]]:
 def do_verify(args: argparse.Namespace) -> int:
     problems = verify_problems(args)
     for code, detail in problems:
-        sys.stderr.write("DRIFT %s: %s\n" % (code, detail))
+        sys.stderr.write(f"DRIFT {code}: {detail}\n")
     if problems:
         return 1
     print("installed executable and LaunchDaemon match the tracked sources")
@@ -419,19 +436,20 @@ def do_uninstall(args: argparse.Namespace) -> int:
     launchctl(["bootout", "system/" + label], check=False)
     if os.path.exists(plist_path):
         os.unlink(plist_path)
-        print("removed %s" % plist_path)
+        print(f"removed {plist_path}")
     # One executable serves every watched target, so removing it because one
     # target went away would break the siblings that still point at it.
     executable = os.path.join(str(args.prefix), INSTALLED_NAME)
     still_used = plists_referencing(executable)
     if still_used:
         print(
-            "kept %s - still referenced by %s"
-            % (executable, ", ".join(os.path.basename(p) for p in still_used))
+            "kept {} - still referenced by {}".format(
+                executable, ", ".join(os.path.basename(p) for p in still_used)
+            )
         )
     elif os.path.exists(executable):
         os.unlink(executable)
-        print("removed %s" % executable)
+        print(f"removed {executable}")
     # The state directory is left behind: it holds the cooldown stamps that
     # record what this host did, and a reinstall should not discard them.
     return 0
@@ -442,7 +460,9 @@ def build_parser() -> argparse.ArgumentParser:
         prog="install.py",
         description="Install, verify, or remove the footprint-watchdog LaunchDaemon.",
     )
-    parser.add_argument("--process", required=True, help="Target executable name or absolute path.")
+    parser.add_argument(
+        "--process", required=True, help="Target executable name or absolute path."
+    )
     parser.add_argument(
         "--ceiling",
         required=True,
@@ -458,7 +478,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--cooldown", type=fw.positive_int, help="Minimum seconds between restarts."
     )
-    parser.add_argument("--context-command", help="Also count these processes in the crossing record.")
+    parser.add_argument(
+        "--context-command", help="Also count these processes in the crossing record."
+    )
     # Exposed here, rather than left to a hand-edited plist, because --verify
     # reports a hand-edited plist as drift: every knob a real install needs has
     # to be reachable from the installer or the two rules contradict each other.
@@ -473,19 +495,28 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="SIZE|off",
         help=(
             "Purge the Data volume's FSEvents history above this size "
-            "(watchdog default: %s for %s, off otherwise)."
-            % (fw.DEFAULT_HISTORY_CEILING, fw.HISTORY_DEFAULT_PROCESS)
+            f"(watchdog default: {fw.DEFAULT_HISTORY_CEILING} for {fw.HISTORY_DEFAULT_PROCESS}, off otherwise)."
         ),
     )
-    parser.add_argument("--log", default=DEFAULT_LOG, help="Log path (default: %(default)s).")
-    parser.add_argument("--prefix", default=DEFAULT_PREFIX, help="Install directory (default: %(default)s).")
+    parser.add_argument(
+        "--log", default=DEFAULT_LOG, help="Log path (default: %(default)s)."
+    )
+    parser.add_argument(
+        "--prefix",
+        default=DEFAULT_PREFIX,
+        help="Install directory (default: %(default)s).",
+    )
     group = parser.add_mutually_exclusive_group()
-    group.add_argument("--verify", action="store_true", help="Check installed files against the sources.")
+    group.add_argument(
+        "--verify",
+        action="store_true",
+        help="Check installed files against the sources.",
+    )
     group.add_argument("--uninstall", action="store_true", help="Unload and remove.")
     return parser
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
     if args.verify:

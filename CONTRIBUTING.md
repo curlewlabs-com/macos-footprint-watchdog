@@ -16,23 +16,29 @@ short discussion up front saves rework.
 
 ## Running the checks
 
-These are the same checks CI runs on every push and PR:
+These are the checks CI runs on every push and PR that are this repository's
+own:
 
 ```sh
 /usr/bin/python3 -m unittest discover -s test -v   # macOS, needs cc
 sudo /usr/bin/python3 -m unittest discover -s test -p 'test_fsevents_history.py' -v
+pip install -r requirements-dev.txt && mypy        # strict; runs anywhere
 npx pyright@<version>                              # strict; runs anywhere
 ```
 
-`<version>` is the pyright release `.github/workflows/ci.yml` pins; another
-release can report different errors than CI does.
+`<version>` is the pyright release `.github/workflows/ci.yml` pins, and
+`requirements-dev.txt` pins mypy; another release can report different errors
+than CI does. CI also runs the checks every Curlew Labs repository shares
+([ci-baseline](https://github.com/curlewlabs-com/ci-baseline)), among them ruff
+and prettier, under this repository's `pyproject.toml`.
 
 The second line runs the FSEvents history cases, which need root and skip in
 the first. They purge only a disk image they attach themselves.
 
 The test suite needs macOS: it compiles a target process and reads the real
-kernel ledger. The type check runs anywhere - `pyrightconfig.json` pins
-`pythonPlatform` to Darwin so the macOS-only calls resolve on Linux too.
+kernel ledger. The type checks run anywhere - `pyrightconfig.json` and
+`pyproject.toml` set the platform to Darwin so the macOS-only calls resolve on
+Linux too.
 
 ## Conventions
 
@@ -48,8 +54,9 @@ kernel ledger. The type check runs anywhere - `pyrightconfig.json` pins
   dict, an exact log string) fails on every legitimate edit while catching
   nothing. Test the invariant instead - for example, that the arguments the
   installer generates are arguments the watchdog's own parser accepts.
-- **Pin dependencies exactly.** The `pyright` pin and the action pins in CI are
-  exact versions so a resolver cannot silently move them. Match that when
+- **Pin dependencies exactly.** `requirements-dev.txt`, the `pyright` pin and
+  the action pins in CI are exact versions so a resolver cannot silently move
+  them. Match that when
   adding any. Renovate proposes their updates; the `# renovate:` comment above
   an inline pin tells it what the literal is, so a new inline pin needs one.
 - **Comments explain _why_, not _what_.** Most of the non-obvious code here is

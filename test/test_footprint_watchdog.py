@@ -21,11 +21,11 @@ import sys
 import tempfile
 import time
 import unittest
-from typing import Dict, List, Optional, Set, Tuple, cast
+from typing import cast
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import footprint_watchdog as fw  # noqa: E402
+import footprint_watchdog as fw
 
 # Long enough that a target outlives the case driving it, short enough that a
 # leaked process disappears on its own rather than lingering on a dev machine.
@@ -62,10 +62,14 @@ _DEAD_PID = 999999
 def setUpModule() -> None:
     global _build_dir, _target_bin
     _build_dir = tempfile.mkdtemp(prefix="footprint-watchdog-test.")
-    source = os.path.join(os.path.dirname(os.path.abspath(__file__)), "footprint_target.c")
+    source = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "footprint_target.c"
+    )
     # realpath: the watchdog matches resolved paths, and mkdtemp hands back a
     # /var/folders path that is itself behind a symlink on macOS.
-    _target_bin = os.path.realpath(os.path.join(_build_dir, "footprint-watchdog-testtarget"))
+    _target_bin = os.path.realpath(
+        os.path.join(_build_dir, "footprint-watchdog-testtarget")
+    )
     subprocess.run(
         ["cc", "-O0", "-Wall", "-Wextra", "-o", _target_bin, source],
         check=True,
@@ -78,7 +82,7 @@ def tearDownModule() -> None:
         subprocess.run(["rm", "-rf", _build_dir], check=False)
 
 
-def _ps_pids() -> Set[int]:
+def _ps_pids() -> set[int]:
     """Every pid ps can see, as an independent check on the ctypes listing."""
     listing = subprocess.run(
         ["/bin/ps", "-A", "-o", "pid="], capture_output=True, text=True, check=True
@@ -86,7 +90,7 @@ def _ps_pids() -> Set[int]:
     return {int(line) for line in listing.stdout.split()}
 
 
-def _wait_for_ready(process: "subprocess.Popen[str]") -> None:
+def _wait_for_ready(process: subprocess.Popen[str]) -> None:
     """Block until the target reports its allocation is dirtied and resident."""
     assert process.stderr is not None
     deadline = time.time() + INFINITE
@@ -96,7 +100,7 @@ def _wait_for_ready(process: "subprocess.Popen[str]") -> None:
             return
         if process.poll() is not None:
             raise AssertionError("target exited before signalling ready")
-    raise AssertionError("target did not signal ready within %.0fs" % INFINITE)
+    raise AssertionError(f"target did not signal ready within {INFINITE:.0f}s")
 
 
 class TargetProcess:
@@ -107,7 +111,7 @@ class TargetProcess:
     replaced?" assertion meaningful.
     """
 
-    def __init__(self, mib: int, respawn_mib: Optional[int] = None) -> None:
+    def __init__(self, mib: int, respawn_mib: int | None = None) -> None:
         self.respawning = respawn_mib is not None
         if self.respawning:
             script = '"$1" "$2" "$4"; while :; do "$1" "$3" "$4"; done'
@@ -133,7 +137,7 @@ class TargetProcess:
         )
         _wait_for_ready(self.process)
 
-    def pids(self) -> List[int]:
+    def pids(self) -> list[int]:
         return [pid for pid, _ in fw.find_targets(_target_bin)]
 
     def close(self) -> None:
@@ -150,9 +154,9 @@ class ParseSizeTest(unittest.TestCase):
     def test_accepts_bare_bytes_and_unit_suffixes(self) -> None:
         self.assertEqual(fw.parse_size("2147483648"), 2147483648)
         self.assertEqual(fw.parse_size("1KiB"), 1024)
-        self.assertEqual(fw.parse_size("512MiB"), 512 * 1024 ** 2)
-        self.assertEqual(fw.parse_size("2GiB"), 2 * 1024 ** 3)
-        self.assertEqual(fw.parse_size("1TiB"), 1024 ** 4)
+        self.assertEqual(fw.parse_size("512MiB"), 512 * 1024**2)
+        self.assertEqual(fw.parse_size("2GiB"), 2 * 1024**3)
+        self.assertEqual(fw.parse_size("1TiB"), 1024**4)
 
     def test_mb_and_mib_mean_the_same_thing(self) -> None:
         # Apple's own tools print "MB" for what is really MiB (footprint(1)
@@ -172,7 +176,7 @@ class HumanBytesTest(unittest.TestCase):
         self.assertEqual(fw.human_bytes(512), "512 B")
         self.assertEqual(fw.human_bytes(1024), "1.0 KiB")
         self.assertEqual(fw.human_bytes(68190568), "65.0 MiB")
-        self.assertEqual(fw.human_bytes(33 * 1024 ** 3), "33.0 GiB")
+        self.assertEqual(fw.human_bytes(33 * 1024**3), "33.0 GiB")
 
 
 class CooldownTest(unittest.TestCase):
@@ -247,7 +251,9 @@ class FindTargetsTest(unittest.TestCase):
     def test_never_returns_launchd(self) -> None:
         # Signalling pid 1 is unrecoverable, so it is excluded structurally
         # rather than by trusting no ceiling will ever be set against it.
-        self.assertEqual([pid for pid, _ in fw.find_targets("/sbin/launchd") if pid == 1], [])
+        self.assertEqual(
+            [pid for pid, _ in fw.find_targets("/sbin/launchd") if pid == 1], []
+        )
 
 
 class TimingArgumentTest(unittest.TestCase):
@@ -272,8 +278,16 @@ class TimingArgumentTest(unittest.TestCase):
 
     def test_positive_values_still_parse(self) -> None:
         parsed = fw.build_parser().parse_args(
-            ["--process", "x", "--ceiling", "1GiB", "--cooldown", "60",
-             "--respawn-timeout", "0.5"]
+            [
+                "--process",
+                "x",
+                "--ceiling",
+                "1GiB",
+                "--cooldown",
+                "60",
+                "--respawn-timeout",
+                "0.5",
+            ]
         )
         self.assertEqual(parsed.cooldown, 60)
         self.assertEqual(parsed.respawn_timeout, 0.5)
@@ -376,8 +390,8 @@ class ReadSampleTest(unittest.TestCase):
         pid, path = fw.find_targets(_target_bin)[0]
         sample = fw.read_sample(pid, path)
         assert sample is not None
-        self.assertGreaterEqual(sample.footprint, 64 * 1024 ** 2)
-        self.assertLess(sample.footprint, 128 * 1024 ** 2)
+        self.assertGreaterEqual(sample.footprint, 64 * 1024**2)
+        self.assertLess(sample.footprint, 128 * 1024**2)
         self.assertGreater(sample.age_seconds, 0.0)
         # A wrong mach timebase reads ~40x high on Apple silicon, so a target
         # started seconds ago would claim minutes of age.
@@ -390,7 +404,7 @@ class ReadSampleTest(unittest.TestCase):
 class WaitForReplacementTest(unittest.TestCase):
     """What counts as a replacement, and what only looks like one."""
 
-    def wait(self, old_pid: int, timeout: float) -> Tuple[Optional[Tuple[int, str]], str]:
+    def wait(self, old_pid: int, timeout: float) -> tuple[tuple[int, str] | None, str]:
         return fw.wait_for_replacement(
             _target_bin, old_pid, timeout, time.time, time.sleep
         )
@@ -453,7 +467,7 @@ class RunTickTest(unittest.TestCase):
         ceiling: int,
         dry_run: bool = False,
         cooldown_seconds: float = 3600.0,
-        state_path: Optional[str] = None,
+        state_path: str | None = None,
         respawn_timeout: float = INFINITE,
     ) -> int:
         return fw.run_tick(
@@ -470,14 +484,14 @@ class RunTickTest(unittest.TestCase):
             out=self.out,
         )
 
-    def records(self) -> List[Dict[str, object]]:
+    def records(self) -> list[dict[str, object]]:
         return [
-            cast(Dict[str, object], json.loads(line))
+            cast(dict[str, object], json.loads(line))
             for line in self.out.getvalue().splitlines()
             if line
         ]
 
-    def only_record(self) -> Dict[str, object]:
+    def only_record(self) -> dict[str, object]:
         records = self.records()
         self.assertEqual(len(records), 1, self.out.getvalue())
         return records[0]
@@ -485,13 +499,13 @@ class RunTickTest(unittest.TestCase):
     def test_absent_target_is_reported_not_ignored(self) -> None:
         # A watchdog whose target vanished is not watching anything; staying
         # silent would be indistinguishable from a healthy tick.
-        self.assertEqual(self.tick(ceiling=1024 ** 3), fw.EXIT_TARGET_ABSENT)
+        self.assertEqual(self.tick(ceiling=1024**3), fw.EXIT_TARGET_ABSENT)
         self.assertEqual(self.only_record()["event"], "target_absent")
 
     def test_below_ceiling_writes_nothing_at_all(self) -> None:
         target = TargetProcess(mib=8)
         self.addCleanup(target.close)
-        self.assertEqual(self.tick(ceiling=512 * 1024 ** 2), fw.EXIT_OK)
+        self.assertEqual(self.tick(ceiling=512 * 1024**2), fw.EXIT_OK)
         self.assertEqual(self.out.getvalue(), "")
 
     def test_ambiguous_target_refuses_and_signals_nothing(self) -> None:
@@ -508,7 +522,7 @@ class RunTickTest(unittest.TestCase):
         target = TargetProcess(mib=64)
         self.addCleanup(target.close)
         before = target.pids()
-        self.assertEqual(self.tick(ceiling=32 * 1024 ** 2, dry_run=True), fw.EXIT_OK)
+        self.assertEqual(self.tick(ceiling=32 * 1024**2, dry_run=True), fw.EXIT_OK)
         record = self.only_record()
         self.assertEqual(record["event"], "ceiling_crossed")
         self.assertIs(record["dry_run"], True)
@@ -520,16 +534,16 @@ class RunTickTest(unittest.TestCase):
         self.addCleanup(target.close)
         original = target.pids()
         self.assertEqual(len(original), 1)
-        self.assertEqual(self.tick(ceiling=32 * 1024 ** 2), fw.EXIT_OK)
+        self.assertEqual(self.tick(ceiling=32 * 1024**2), fw.EXIT_OK)
 
         events = [record["event"] for record in self.records()]
         self.assertEqual(events, ["ceiling_crossed", "recovered"])
         recovered = self.records()[1]
-        before = cast(Dict[str, object], recovered["before"])
-        after = cast(Dict[str, object], recovered["after"])
+        before = cast(dict[str, object], recovered["before"])
+        after = cast(dict[str, object], recovered["after"])
         self.assertEqual(before["pid"], original[0])
         self.assertNotEqual(after["pid"], original[0])
-        self.assertLess(int(str(after["footprint_bytes"])), 32 * 1024 ** 2)
+        self.assertLess(int(str(after["footprint_bytes"])), 32 * 1024**2)
 
     def test_the_cooldown_stamp_lands_before_the_signal(self) -> None:
         # The stamp has to be durable before the irreversible half happens. If
@@ -542,7 +556,7 @@ class RunTickTest(unittest.TestCase):
         before = target.pids()
         unwritable = os.path.join(self.directory, "no-such-dir", "target.state.json")
         self.assertEqual(
-            self.tick(ceiling=32 * 1024 ** 2, state_path=unwritable),
+            self.tick(ceiling=32 * 1024**2, state_path=unwritable),
             fw.EXIT_UNSAFE_PATH,
         )
         events = [record["event"] for record in self.records()]
@@ -556,7 +570,7 @@ class RunTickTest(unittest.TestCase):
         target = TargetProcess(mib=64)
         self.addCleanup(target.close)
         self.assertEqual(
-            self.tick(ceiling=32 * 1024 ** 2, respawn_timeout=EXPIRING_RESPAWN_SECONDS),
+            self.tick(ceiling=32 * 1024**2, respawn_timeout=EXPIRING_RESPAWN_SECONDS),
             fw.EXIT_RESPAWN_FAILED,
         )
         events = [record["event"] for record in self.records()]
@@ -576,14 +590,15 @@ class RunTickTest(unittest.TestCase):
     def test_cooldown_suppresses_a_second_restart(self) -> None:
         target = TargetProcess(mib=64, respawn_mib=64)
         self.addCleanup(target.close)
-        self.assertEqual(self.tick(ceiling=32 * 1024 ** 2), fw.EXIT_REPLACEMENT_ABOVE_CEILING)
+        self.assertEqual(
+            self.tick(ceiling=32 * 1024**2), fw.EXIT_REPLACEMENT_ABOVE_CEILING
+        )
         surviving = target.pids()
 
         self.out = io.StringIO()
-        self.assertEqual(self.tick(ceiling=32 * 1024 ** 2), fw.EXIT_COOLDOWN_SUPPRESSED)
+        self.assertEqual(self.tick(ceiling=32 * 1024**2), fw.EXIT_COOLDOWN_SUPPRESSED)
         self.assertEqual(self.only_record()["event"], "cooldown_suppressed")
         self.assertEqual(target.pids(), surviving)
-
 
 
 class RecordTimeTest(unittest.TestCase):
@@ -597,12 +612,19 @@ class RecordTimeTest(unittest.TestCase):
         stamp = str(json.loads(out.getvalue())["time"])
         result = subprocess.run(
             [
-                "/usr/bin/log", "show", "--start", stamp, "--end", stamp,
-                "--predicate", 'process == "footprint-watchdog-no-such-process"',
+                "/usr/bin/log",
+                "show",
+                "--start",
+                stamp,
+                "--end",
+                stamp,
+                "--predicate",
+                'process == "footprint-watchdog-no-such-process"',
             ],
             capture_output=True,
             text=True,
             timeout=INFINITE,
+            check=False,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("Failed conversion", result.stderr)

@@ -1,0 +1,21 @@
+# Tool configuration only: macos-footprint-watchdog is not a Python package,
+# and runs from its checkout.
+
+[tool.ruff]
+# The python3 the Command Line Tools install at /usr/bin/python3, which the
+# LaunchDaemon runs.
+target-version = "py39"
+
+[tool.ruff.lint]
+extend-select = ["I", "UP", "B"]
+
+[tool.mypy]
+# The floor is 3.9, but mypy cannot check for anything older than 3.10. pyright
+# (pyrightconfig.json) and the tests, which CI runs on /usr/bin/python3, hold
+# the real floor.
+python_version = "3.10"
+# macOS-only code, type-checked on Linux in CI: check it as darwin wherever mypy
+# runs, as pyrightconfig.json does for pyright.
+platform = "darwin"
+strict = true
+files = ["footprint_watchdog.py", "install.py", "test"]

@@ -113,11 +113,11 @@ That installs `/usr/local/sbin/footprint-watchdog` root-owned and mode 0755,
 writes a LaunchDaemon to `/Library/LaunchDaemons`, and loads it. Re-running is
 how you change settings - it rewrites the job and reloads it.
 
-| Command | What it does |
-| --- | --- |
-| `sudo ./install.py --process P --ceiling C` | Install and load |
-| `./install.py --process P --ceiling C --verify` | Check the installed files still match this checkout |
-| `sudo ./install.py --process P --ceiling C --uninstall` | Unload and remove that target |
+| Command                                                 | What it does                                        |
+| ------------------------------------------------------- | --------------------------------------------------- |
+| `sudo ./install.py --process P --ceiling C`             | Install and load                                    |
+| `./install.py --process P --ceiling C --verify`         | Check the installed files still match this checkout |
+| `sudo ./install.py --process P --ceiling C --uninstall` | Unload and remove that target                       |
 
 You can watch more than one process on a host: each target gets its own
 LaunchDaemon and its own cooldown, and they share the single installed
@@ -196,19 +196,19 @@ must never trigger one.
 
 ## Exit codes
 
-| Code | Meaning |
-| --- | --- |
-| 0 | Below the ceiling, or restarted and the replacement is healthy |
-| 2 | Usage error |
-| 3 | Not root |
-| 4 | Target not running, or unreadable |
-| 5 | More than one process matched - refused to act |
-| 6 | Above the ceiling but inside the cooldown - suppressed |
-| 7 | Signalled, but recovery could not be confirmed |
-| 8 | Replacement appeared and is already above the ceiling |
-| 9 | The state directory is not root-only, or the cooldown could not be stamped |
-| 10 | History over its ceiling, and `fseventsd` refused the purge |
-| 11 | Purged, and the history is still over its ceiling |
+| Code | Meaning                                                                    |
+| ---- | -------------------------------------------------------------------------- |
+| 0    | Below the ceiling, or restarted and the replacement is healthy             |
+| 2    | Usage error                                                                |
+| 3    | Not root                                                                   |
+| 4    | Target not running, or unreadable                                          |
+| 5    | More than one process matched - refused to act                             |
+| 6    | Above the ceiling but inside the cooldown - suppressed                     |
+| 7    | Signalled, but recovery could not be confirmed                             |
+| 8    | Replacement appeared and is already above the ceiling                      |
+| 9    | The state directory is not root-only, or the cooldown could not be stamped |
+| 10   | History over its ceiling, and `fseventsd` refused the purge                |
+| 11   | Purged, and the history is still over its ceiling                          |
 
 A tick that ran both checks exits with the first code that is not 0, restart
 check first. Code 6 covers a history back over its ceiling within the cooldown
@@ -269,7 +269,7 @@ alternatives are all wrong in ways that only show up during the failure.
 
 **Not RSS.** As a runaway process drives the machine into swap, its own pages
 are compressed and paged out - and RSS stops counting them. RSS therefore
-*falls* as the failure gets worse, and a badly runaway daemon ends up with
+_falls_ as the failure gets worse, and a badly runaway daemon ends up with
 essentially all of its footprint swapped out. Footprint counts compressed and
 swapped pages; RSS is the one number guaranteed to under-report exactly when it
 matters.
@@ -298,11 +298,17 @@ with `--ceiling 1 --dry-run` and look at the `path` field.
 ```sh
 /usr/bin/python3 -m unittest discover -s test -v   # needs macOS and cc
 sudo /usr/bin/python3 -m unittest discover -s test -p 'test_fsevents_history.py' -v
+pip install -r requirements-dev.txt && mypy        # strict, runs anywhere
 npx pyright@<version>                              # strict, runs anywhere
 ```
 
-Use the pyright release `.github/workflows/ci.yml` pins; another release can
-report different errors than CI does.
+Use the mypy `requirements-dev.txt` pins and the pyright release
+`.github/workflows/ci.yml` pins; another release can report different errors
+than CI does. mypy cannot check for Python 3.9, so it checks for 3.10; pyright
+and the tests on `/usr/bin/python3` hold the 3.9 floor. CI also runs the checks
+every Curlew Labs repository shares
+([ci-baseline](https://github.com/curlewlabs-com/ci-baseline)), among them ruff
+and prettier, under this repository's `pyproject.toml`.
 
 The history purge cases need root and skip without it. They attach a small APFS
 disk image, churn files on it until `fseventsd` has written journals, and purge
@@ -314,9 +320,8 @@ supervisor replace it - rather than mocking the measurement. See the docstring
 in `test/test_footprint_watchdog.py` for why, and `test/footprint_target.c` for
 why the target has to be compiled per run.
 
-CI runs both on `macos-15` and `macos-26`. The thing being read is a kernel
-structure, so a change between major versions is the regression most worth
-catching.
+CI runs them on `macos-26`. The thing being read is a kernel structure, so a
+change in it is the regression most worth catching.
 
 ## License
 

@@ -1,8 +1,9 @@
 name: CI
 
 # Gate every PR (and post-merge main) on the checks a contributor runs locally:
-# strict pyright anywhere, and the real-process test suite on macOS. See the
-# README "Development" section.
+# strict mypy and pyright anywhere, and the real-process test suite on macOS,
+# plus the checks every Curlew Labs repository shares. See the README
+# "Development" section.
 on:
   push:
     branches: [main]
@@ -23,6 +24,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          # renovate: datasource=python-version depName=python
+          python-version: "3.14.10"
+      - name: Install the pinned tools
+        run: python -m pip install -r requirements-dev.txt
+      - name: mypy (strict)
+        run: mypy
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           # renovate: datasource=node-version depName=node
@@ -34,15 +43,10 @@ jobs:
         run: npx --yes pyright@1.1.414
 
   test:
-    # Both images, because the measurement reads a kernel task-accounting
-    # structure: a layout or semantic change between major macOS versions is
-    # exactly the regression this suite exists to catch, and it would be
-    # invisible on a single image.
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-15, macos-26]
-    runs-on: ${{ matrix.os }}
+    # The measurement reads a kernel task-accounting structure, so the suite
+    # runs against a real macOS kernel: a layout or semantic change there is
+    # exactly the regression it exists to catch.
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -50,7 +54,7 @@ jobs:
       # The suite compiles its own target process (test/footprint_target.c
       # explains why nothing already on the system can serve as one) and reads
       # the real ledger. `cc` and /usr/bin/python3 both come from the Command
-      # Line Tools that are preinstalled on these images.
+      # Line Tools that are preinstalled on the image.
       - name: unit and integration tests
         run: /usr/bin/python3 -m unittest discover -s test -v
       # The history purge cases skip in the run above: attaching a volume that
@@ -68,4 +72,18 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: curlewlabs-com/ci-baseline@c82082df9a3c5e6dab047d9ddb92f130f1537d8e # v0.1.1
+      - uses: curlewlabs-com/ci-baseline@f05f17a38ba2dfbaf0cde130a375b346e9a923a2 # v0.2.0
+
+  conclusion:
+    # The one check branch protection requires, so adding or renaming a job
+    # above needs no settings change - only this list.
+    needs: [lint, test, baseline]
+    runs-on: ubuntu-24.04
+    if: always()
+    steps:
+      - name: Require every job to pass
+        env:
+          LINT: ${{ needs.lint.result }}
+          TEST: ${{ needs.test.result }}
+          BASELINE: ${{ needs.baseline.result }}
+        run: test "$LINT" = success && test "$TEST" = success && test "$BASELINE" = success
