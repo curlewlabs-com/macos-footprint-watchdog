@@ -194,9 +194,13 @@ class HistoryTickTest(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls) -> None:
-        subprocess.run(
-            ["/usr/bin/hdiutil", "detach", "-quiet", "-force", cls.device], check=False
-        )
+        # Empty when a reattach failed: the number of a disk this class already
+        # detached can belong to someone else's image by now.
+        if cls.device:
+            subprocess.run(
+                ["/usr/bin/hdiutil", "detach", "-quiet", "-force", cls.device],
+                check=False,
+            )
         subprocess.run(["rm", "-rf", cls.image_dir], check=False)
 
     def setUp(self) -> None:
@@ -244,6 +248,7 @@ class HistoryTickTest(unittest.TestCase):
                 check=False,
             )
             if detach.returncode == 0:
+                type(self).device = ""
                 break
             # Name whatever held the volume, so a refusal says who refused.
             holders = subprocess.run(
