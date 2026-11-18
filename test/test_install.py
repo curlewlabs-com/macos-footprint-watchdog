@@ -23,12 +23,12 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from typing import List, Optional, cast
+from typing import cast
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import footprint_watchdog as fw  # noqa: E402
-import install  # noqa: E402
+import footprint_watchdog as fw
+import install
 
 
 class LabelTest(unittest.TestCase):
@@ -41,13 +41,15 @@ class LabelTest(unittest.TestCase):
 
     def test_distinct_targets_get_distinct_labels(self) -> None:
         # Two watched processes on one host must not collide onto one job.
-        self.assertNotEqual(install.label_for("fseventsd"), install.label_for("mds_stores"))
+        self.assertNotEqual(
+            install.label_for("fseventsd"), install.label_for("mds_stores")
+        )
 
 
 class GeneratedArgumentsTest(unittest.TestCase):
     """The installer's output has to be input the watchdog accepts."""
 
-    def parse_generated(self, **kwargs: object) -> List[str]:
+    def parse_generated(self, **kwargs: object) -> list[str]:
         contents = install.build_plist(
             process=str(kwargs.get("process", "fseventsd")),
             ceiling=str(kwargs.get("ceiling", "2GiB")),
@@ -59,13 +61,13 @@ class GeneratedArgumentsTest(unittest.TestCase):
             signal_name=kwargs.get("signal_name"),  # type: ignore[arg-type]
             history_ceiling=kwargs.get("history_ceiling"),  # type: ignore[arg-type]
         )
-        return cast(List[str], contents["ProgramArguments"])
+        return cast(list[str], contents["ProgramArguments"])
 
     def test_minimal_arguments_parse_in_the_watchdog(self) -> None:
         arguments = self.parse_generated()
         parsed = fw.build_parser().parse_args(arguments[1:])
         self.assertEqual(parsed.process, "fseventsd")
-        self.assertEqual(fw.parse_size(str(parsed.ceiling)), 2 * 1024 ** 3)
+        self.assertEqual(fw.parse_size(str(parsed.ceiling)), 2 * 1024**3)
 
     def test_every_optional_argument_parses_too(self) -> None:
         arguments = self.parse_generated(
@@ -80,17 +82,23 @@ class GeneratedArgumentsTest(unittest.TestCase):
         self.assertEqual(parsed.signal, "KILL")
         self.assertEqual(
             fw.resolve_history_ceiling(str(parsed.process), parsed.history_ceiling),
-            512 * 1024 ** 2,
+            512 * 1024**2,
         )
 
     def test_a_history_ceiling_of_off_reaches_the_watchdog_as_off(self) -> None:
         # The installer's spelling has to switch the default off, not parse as
         # a size or be dropped on the way to the plist.
-        parsed = fw.build_parser().parse_args(self.parse_generated(history_ceiling="off")[1:])
-        self.assertIsNone(fw.resolve_history_ceiling(str(parsed.process), parsed.history_ceiling))
+        parsed = fw.build_parser().parse_args(
+            self.parse_generated(history_ceiling="off")[1:]
+        )
+        self.assertIsNone(
+            fw.resolve_history_ceiling(str(parsed.process), parsed.history_ceiling)
+        )
 
     def test_the_first_argument_is_the_executable_launchd_will_run(self) -> None:
-        self.assertEqual(self.parse_generated()[0], "/usr/local/sbin/footprint-watchdog")
+        self.assertEqual(
+            self.parse_generated()[0], "/usr/local/sbin/footprint-watchdog"
+        )
 
 
 class LogDestinationTest(unittest.TestCase):
@@ -103,9 +111,8 @@ class LogDestinationTest(unittest.TestCase):
         self.addCleanup(subprocess.run, ["rm", "-rf", self.directory], check=False)
 
     def assert_refused(self, log_path: str) -> None:
-        with contextlib.redirect_stderr(io.StringIO()):
-            with self.assertRaises(SystemExit):
-                install.require_root_only_log(log_path)
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            install.require_root_only_log(log_path)
 
     def test_a_directory_a_non_root_account_owns_is_refused(self) -> None:
         # The spelling this exists for: any account that can write the directory
@@ -135,11 +142,10 @@ class CeilingValidationTest(unittest.TestCase):
         # so no filesystem write can precede the error. Left to the watchdog's
         # first tick instead, the install reports success and leaves a job that
         # can only fail, once an interval, forever.
-        with contextlib.redirect_stderr(io.StringIO()):
-            with self.assertRaises(SystemExit):
-                install.build_parser().parse_args(
-                    ["--process", "fseventsd", "--ceiling", "potatoes"]
-                )
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            install.build_parser().parse_args(
+                ["--process", "fseventsd", "--ceiling", "potatoes"]
+            )
 
     def test_the_validator_rejects_what_the_watchdog_would_reject(self) -> None:
         for bad in ("potatoes", "", "-1", "0", "1e9"):
@@ -203,7 +209,7 @@ class PlistsReferencingTest(unittest.TestCase):
         self.addCleanup(setattr, install, "LAUNCH_DAEMONS", self.original_daemons)
         self.executable = "/usr/local/sbin/footprint-watchdog"
 
-    def write_job(self, process: str, executable: Optional[str] = None) -> str:
+    def write_job(self, process: str, executable: str | None = None) -> str:
         path = install.plist_path_for(process)
         install.write_plist(
             path,
@@ -296,7 +302,7 @@ class VerifyTest(unittest.TestCase):
         install.LAUNCH_DAEMONS = self.original_daemons
         subprocess.run(["rm", "-rf", self.root], check=False)
 
-    def codes(self) -> List[str]:
+    def codes(self) -> list[str]:
         return [code for code, _ in install.verify_problems(self.args)]
 
     def test_matching_content_reports_no_content_or_plist_drift(self) -> None:
@@ -320,12 +326,18 @@ class VerifyTest(unittest.TestCase):
         path = install.plist_path_for("fseventsd")
         with open(path, "rb") as stream:
             contents = plistlib.load(stream)
-        contents["ProgramArguments"] = ["/usr/local/sbin/footprint-watchdog", "--process", "fseventsd"]
+        contents["ProgramArguments"] = [
+            "/usr/local/sbin/footprint-watchdog",
+            "--process",
+            "fseventsd",
+        ]
         install.write_plist(path, contents)
         self.assertIn("launchdaemon_differs", self.codes())
 
     def test_an_edited_executable_is_drift(self) -> None:
-        with open(os.path.join(self.prefix, install.INSTALLED_NAME), "a", encoding="utf-8") as stream:
+        with open(
+            os.path.join(self.prefix, install.INSTALLED_NAME), "a", encoding="utf-8"
+        ) as stream:
             stream.write("\n# local edit\n")
         self.assertIn("executable_content_differs", self.codes())
 

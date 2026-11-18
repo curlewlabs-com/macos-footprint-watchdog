@@ -50,7 +50,8 @@ import subprocess
 import sys
 import tempfile
 import time
-from typing import Callable, Dict, List, Optional, Sequence, Set, TextIO, Tuple, cast
+from collections.abc import Sequence
+from typing import Callable, Optional, TextIO, cast
 
 # Exit codes are the operator's interface: launchd records them, and each names
 # a distinct state so a log line is not needed to tell them apart.
@@ -139,9 +140,15 @@ _LIB = _load_libsystem()
 
 def _load_core_services() -> ctypes.CDLL:
     lib = ctypes.CDLL("/System/Library/Frameworks/CoreServices.framework/CoreServices")
-    lib.FSEventsGetLastEventIdForDeviceBeforeTime.argtypes = [ctypes.c_int32, ctypes.c_double]
+    lib.FSEventsGetLastEventIdForDeviceBeforeTime.argtypes = [
+        ctypes.c_int32,
+        ctypes.c_double,
+    ]
     lib.FSEventsGetLastEventIdForDeviceBeforeTime.restype = ctypes.c_uint64
-    lib.FSEventsPurgeEventsForDeviceUpToEventId.argtypes = [ctypes.c_int32, ctypes.c_uint64]
+    lib.FSEventsPurgeEventsForDeviceUpToEventId.argtypes = [
+        ctypes.c_int32,
+        ctypes.c_uint64,
+    ]
     lib.FSEventsPurgeEventsForDeviceUpToEventId.restype = ctypes.c_ubyte
     lib.FSEventsCopyUUIDForDevice.argtypes = [ctypes.c_int32]
     lib.FSEventsCopyUUIDForDevice.restype = ctypes.c_void_p
@@ -149,10 +156,17 @@ def _load_core_services() -> ctypes.CDLL:
 
 
 def _load_core_foundation() -> ctypes.CDLL:
-    lib = ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+    lib = ctypes.CDLL(
+        "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"
+    )
     lib.CFUUIDCreateString.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
     lib.CFUUIDCreateString.restype = ctypes.c_void_p
-    lib.CFStringGetCString.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_long, ctypes.c_uint32]
+    lib.CFStringGetCString.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_char_p,
+        ctypes.c_long,
+        ctypes.c_uint32,
+    ]
     lib.CFStringGetCString.restype = ctypes.c_ubyte
     lib.CFRelease.argtypes = [ctypes.c_void_p]
     lib.CFRelease.restype = None
@@ -209,14 +223,16 @@ class Sample:
     once the process it named can exit.
     """
 
-    def __init__(self, pid: int, path: str, footprint: int, resident: int, age_seconds: float) -> None:
+    def __init__(
+        self, pid: int, path: str, footprint: int, resident: int, age_seconds: float
+    ) -> None:
         self.pid = pid
         self.path = path
         self.footprint = footprint
         self.resident = resident
         self.age_seconds = age_seconds
 
-    def as_record(self) -> Dict[str, object]:
+    def as_record(self) -> dict[str, object]:
         return {
             "pid": self.pid,
             "path": self.path,
@@ -232,9 +248,9 @@ def human_bytes(value: int) -> str:
     size = float(value)
     for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
         if size < 1024.0 or unit == "TiB":
-            return "%.1f %s" % (size, unit) if unit != "B" else "%d B" % value
+            return f"{size:.1f} {unit}" if unit != "B" else f"{value:d} B"
         size /= 1024.0
-    return "%d B" % value
+    return f"{value:d} B"
 
 
 def parse_size(text: str) -> int:
@@ -244,15 +260,17 @@ def parse_size(text: str) -> int:
     the same conflation Apple's own tools print, and the safer reading for a
     ceiling, since a smaller-than-intended ceiling only restarts sooner.
     """
-    match = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([KMGT]i?B?|B)?\s*", text, re.IGNORECASE)
+    match = re.fullmatch(
+        r"\s*(\d+(?:\.\d+)?)\s*([KMGT]i?B?|B)?\s*", text, re.IGNORECASE
+    )
     if match is None:
-        raise ValueError("not a byte size: %r (try 2GiB, 512MiB, or 2147483648)" % text)
+        raise ValueError(f"not a byte size: {text!r} (try 2GiB, 512MiB, or 2147483648)")
     number = float(match.group(1))
     suffix = (match.group(2) or "B").upper().rstrip("B").rstrip("I")
-    scale = {"": 1, "K": 1024, "M": 1024 ** 2, "G": 1024 ** 3, "T": 1024 ** 4}[suffix]
+    scale = {"": 1, "K": 1024, "M": 1024**2, "G": 1024**3, "T": 1024**4}[suffix]
     value = int(number * scale)
     if value <= 0:
-        raise ValueError("byte size must be positive: %r" % text)
+        raise ValueError(f"byte size must be positive: {text!r}")
     return value
 
 
@@ -265,25 +283,25 @@ def positive_int(text: str) -> int:
     """
     value = int(text)
     if value <= 0:
-        raise argparse.ArgumentTypeError("must be greater than zero, got %r" % text)
+        raise argparse.ArgumentTypeError(f"must be greater than zero, got {text!r}")
     return value
 
 
 def positive_float(text: str) -> float:
     value = float(text)
     if value <= 0:
-        raise argparse.ArgumentTypeError("must be greater than zero, got %r" % text)
+        raise argparse.ArgumentTypeError(f"must be greater than zero, got {text!r}")
     return value
 
 
-def _mach_timebase() -> Tuple[int, int]:
+def _mach_timebase() -> tuple[int, int]:
     info = _MachTimebaseInfo()
     if _LIB.mach_timebase_info(ctypes.byref(info)) != 0:
         raise OSError("mach_timebase_info failed")
     return int(info.numer), int(info.denom)
 
 
-def read_sample(pid: int, path: str) -> Optional[Sample]:
+def read_sample(pid: int, path: str) -> Sample | None:
     """Read one pid's ledger, or None if it exited or is unreadable.
 
     Unreadable is the non-root case: `proc_pid_rusage` returns EPERM for a
@@ -308,7 +326,7 @@ def read_sample(pid: int, path: str) -> Optional[Sample]:
     )
 
 
-def list_pids() -> List[int]:
+def list_pids() -> list[int]:
     """Every pid on the host, or an error - never a partial list.
 
     proc_listpids fills the buffer it is given and reports how many bytes it
@@ -336,10 +354,10 @@ def list_pids() -> List[int]:
         if written < ctypes.sizeof(buffer):
             count = written // ctypes.sizeof(ctypes.c_int32)
             return [int(buffer[i]) for i in range(count) if buffer[i] > 0]
-    raise OSError("proc_listpids filled every buffer up to %d entries" % capacity)
+    raise OSError(f"proc_listpids filled every buffer up to {capacity:d} entries")
 
 
-def pid_path(pid: int) -> Optional[str]:
+def pid_path(pid: int) -> str | None:
     buffer = ctypes.create_string_buffer(_PROC_PIDPATHINFO_MAXSIZE)
     length: int = _LIB.proc_pidpath(pid, buffer, _PROC_PIDPATHINFO_MAXSIZE)
     if length <= 0:
@@ -375,10 +393,10 @@ def target_key(spec: str) -> str:
     canonical = canonical_spec(spec)
     digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:12]
     readable = re.sub(r"[^A-Za-z0-9_.-]", "_", os.path.basename(canonical))[:40]
-    return "%s-%s" % (readable or "target", digest)
+    return "{}-{}".format(readable or "target", digest)
 
 
-def _ancestor_chain(path: str) -> List[str]:
+def _ancestor_chain(path: str) -> list[str]:
     """`path` and every ancestor, starting at the nearest one that exists.
 
     A path that does not exist yet is governed by the nearest ancestor that
@@ -390,7 +408,7 @@ def _ancestor_chain(path: str) -> List[str]:
         if parent == current:
             return []
         current = parent
-    chain: List[str] = []
+    chain: list[str] = []
     while True:
         chain.append(current)
         parent = os.path.dirname(current)
@@ -399,7 +417,7 @@ def _ancestor_chain(path: str) -> List[str]:
         current = parent
 
 
-def unsafe_path_owners(path: str) -> List[str]:
+def unsafe_path_owners(path: str) -> list[str]:
     """Components of `path` that an account other than root could replace.
 
     Every directory on the way to a file root executes, or writes into, has to
@@ -415,9 +433,12 @@ def unsafe_path_owners(path: str) -> List[str]:
     anyone - and it is the written path that root actually traverses.
     """
     absolute = os.path.abspath(path)
-    problems: List[str] = []
-    seen: Set[str] = set()
-    for chain in (_ancestor_chain(absolute), _ancestor_chain(os.path.realpath(absolute))):
+    problems: list[str] = []
+    seen: set[str] = set()
+    for chain in (
+        _ancestor_chain(absolute),
+        _ancestor_chain(os.path.realpath(absolute)),
+    ):
         for component in chain:
             if component in seen:
                 continue
@@ -428,7 +449,7 @@ def unsafe_path_owners(path: str) -> List[str]:
     return problems
 
 
-def find_targets(spec: str) -> List[Tuple[int, str]]:
+def find_targets(spec: str) -> list[tuple[int, str]]:
     """Every running process matching `spec`, as (pid, executable path).
 
     Matching is EXACT - full path if `spec` is absolute, else basename. This is
@@ -447,7 +468,7 @@ def find_targets(spec: str) -> List[Tuple[int, str]]:
     # matches, because the kernel reports the process as `/private/tmp/x`.
     if absolute:
         spec = os.path.realpath(spec)
-    matches: List[Tuple[int, str]] = []
+    matches: list[tuple[int, str]] = []
     for pid in list_pids():
         if pid <= 1:
             continue
@@ -459,14 +480,14 @@ def find_targets(spec: str) -> List[Tuple[int, str]]:
     return matches
 
 
-def host_context(context_command: Optional[str]) -> Dict[str, object]:
+def host_context(context_command: str | None) -> dict[str, object]:
     """Host-wide numbers that explain a crossing but never trigger one.
 
     Swap and load include every other process on the box, so they cannot tell a
     runaway daemon apart from an honestly busy machine - they belong in the
     record as context and nowhere in the decision.
     """
-    context: Dict[str, object] = {}
+    context: dict[str, object] = {}
     try:
         load1, load5, load15 = os.getloadavg()
         context["load_average"] = [round(load1, 2), round(load5, 2), round(load15, 2)]
@@ -493,9 +514,9 @@ def host_context(context_command: Optional[str]) -> Dict[str, object]:
     return context
 
 
-def read_state(state_path: str) -> Dict[str, object]:
+def read_state(state_path: str) -> dict[str, object]:
     try:
-        with open(state_path, "r", encoding="utf-8") as handle:
+        with open(state_path, encoding="utf-8") as handle:
             loaded = cast(object, json.load(handle))
     except FileNotFoundError:
         return {}
@@ -508,10 +529,10 @@ def read_state(state_path: str) -> Dict[str, object]:
         return {}
     # Cast rather than validate field by field: every reader below re-checks the
     # type of the value it wants, so a wrong shape costs a default, not a crash.
-    return cast(Dict[str, object], loaded)
+    return cast(dict[str, object], loaded)
 
 
-def write_state(state_path: str, state: Dict[str, object]) -> None:
+def write_state(state_path: str, state: dict[str, object]) -> None:
     """Replace the state file atomically, via a name nothing can predict.
 
     A fixed `.tmp` sibling would be a predictable path that root opens for
@@ -528,7 +549,7 @@ def write_state(state_path: str, state: Dict[str, object]) -> None:
 
 
 def cooldown_remaining(
-    last_restart_epoch: Optional[float], now_epoch: float, cooldown_seconds: float
+    last_restart_epoch: float | None, now_epoch: float, cooldown_seconds: float
 ) -> float:
     """Seconds left before another restart is allowed; 0.0 when one is.
 
@@ -554,12 +575,12 @@ class HistorySample:
     so the record carries it before and after.
     """
 
-    def __init__(self, history_bytes: int, files: int, uuid: Optional[str]) -> None:
+    def __init__(self, history_bytes: int, files: int, uuid: str | None) -> None:
         self.history_bytes = history_bytes
         self.files = files
         self.uuid = uuid
 
-    def as_record(self) -> Dict[str, object]:
+    def as_record(self) -> dict[str, object]:
         return {
             "history_bytes": self.history_bytes,
             "history_human": human_bytes(self.history_bytes),
@@ -568,7 +589,7 @@ class HistorySample:
         }
 
 
-def resolve_history_ceiling(process: str, text: Optional[str]) -> Optional[int]:
+def resolve_history_ceiling(process: str, text: str | None) -> int | None:
     """The history ceiling a tick enforces, or None when it bounds no history.
 
     Unset means the default for fseventsd and off for anything else: no other
@@ -583,7 +604,7 @@ def resolve_history_ceiling(process: str, text: Optional[str]) -> Optional[int]:
     return parse_size(text)
 
 
-def mount_point(path: str) -> Optional[str]:
+def mount_point(path: str) -> str | None:
     """The mount point of the volume `path` is on, or None if statfs fails.
 
     Not `os.path.ismount`: it compares a path's device with its parent's, and
@@ -593,10 +614,11 @@ def mount_point(path: str) -> Optional[str]:
     info = _Statfs()
     if _STATFS(path.encode(), ctypes.byref(info)) != 0:
         return None
-    return info.f_mntonname.decode()
+    mount: bytes = info.f_mntonname
+    return mount.decode()
 
 
-def history_uuid(device: int) -> Optional[str]:
+def history_uuid(device: int) -> str | None:
     reference = cast(Optional[int], _CORE_SERVICES.FSEventsCopyUUIDForDevice(device))
     if not reference:
         return None
@@ -605,12 +627,16 @@ def history_uuid(device: int) -> Optional[str]:
     if not text:
         return None
     buffer = ctypes.create_string_buffer(64)
-    converted = bool(_CORE_FOUNDATION.CFStringGetCString(text, buffer, len(buffer), _CF_STRING_ENCODING_UTF8))
+    converted = bool(
+        _CORE_FOUNDATION.CFStringGetCString(
+            text, buffer, len(buffer), _CF_STRING_ENCODING_UTF8
+        )
+    )
     _CORE_FOUNDATION.CFRelease(text)
     return buffer.value.decode("ascii") if converted else None
 
 
-def read_history(volume: str) -> Optional[HistorySample]:
+def read_history(volume: str) -> HistorySample | None:
     """The volume's persisted history, or None when it keeps none.
 
     A volume with no `.fseventsd`, or with Apple's per-volume `no_log` marker in
@@ -634,7 +660,7 @@ def read_history(volume: str) -> Optional[HistorySample]:
     return HistorySample(total, files, history_uuid(os.stat(volume).st_dev))
 
 
-def purge_history(volume: str, now_epoch: float) -> Tuple[int, bool]:
+def purge_history(volume: str, now_epoch: float) -> tuple[int, bool]:
     """Ask fseventsd to drop the volume's history through its newest event on
     disk. Returns that event ID (0 when there was none) and whether the purge
     call succeeded.
@@ -654,17 +680,21 @@ def purge_history(volume: str, now_epoch: float) -> Tuple[int, bool]:
     # FSEvents.h types this time as a CFAbsoluteTime, but fseventsd compares it
     # with Unix time: given a CFAbsoluteTime, even one in the future, it logs
     # "requested timestamp is prior to the earliest log file" and answers 0.
-    event_id = int(_CORE_SERVICES.FSEventsGetLastEventIdForDeviceBeforeTime(device, now_epoch))
+    event_id = int(
+        _CORE_SERVICES.FSEventsGetLastEventIdForDeviceBeforeTime(device, now_epoch)
+    )
     if event_id == 0:
         return 0, False
-    return event_id, bool(_CORE_SERVICES.FSEventsPurgeEventsForDeviceUpToEventId(device, event_id))
+    return event_id, bool(
+        _CORE_SERVICES.FSEventsPurgeEventsForDeviceUpToEventId(device, event_id)
+    )
 
 
 def run_history_tick(
     volume: str,
     ceiling: int,
     cooldown_seconds: float,
-    state_path: Optional[str],
+    state_path: str | None,
     dry_run: bool,
     now_fn: Callable[[], float],
     out: TextIO,
@@ -746,7 +776,7 @@ def run_history_tick(
                 {
                     "event": "cooldown_stamp_failed",
                     "path": state_path,
-                    "reason": "%s; refusing to purge without a durable cooldown" % exc,
+                    "reason": f"{exc}; refusing to purge without a durable cooldown",
                 },
                 out,
             )
@@ -759,7 +789,9 @@ def run_history_tick(
                 "event": "history_purge_failed",
                 "volume": volume,
                 "event_id": hex(event_id),
-                "reason": "no event on disk to purge through" if event_id == 0 else "fseventsd refused the purge",
+                "reason": "no event on disk to purge through"
+                if event_id == 0
+                else "fseventsd refused the purge",
             },
             out,
         )
@@ -801,7 +833,7 @@ def wait_for_replacement(
     now_fn: Callable[[], float],
     sleep_fn: Callable[[float], None],
     poll_seconds: float = DEFAULT_RESPAWN_POLL_SECONDS,
-) -> Tuple[Optional[Tuple[int, str]], str]:
+) -> tuple[tuple[int, str] | None, str]:
     """Wait for the supervisor to replace the target, unambiguously.
 
     Recovery means exactly one process matches and it is not the one signalled.
@@ -851,7 +883,7 @@ def first_failure(*codes: int) -> int:
 RECORD_TIME_FORMAT = "%Y-%m-%d %H:%M:%S+0000"
 
 
-def emit(record: Dict[str, object], stream: TextIO) -> None:
+def emit(record: dict[str, object], stream: TextIO) -> None:
     """One event, one line of JSON. Callers emit nothing on the quiet path."""
     stamped = dict(record)
     stamped["time"] = time.strftime(RECORD_TIME_FORMAT, time.gmtime())
@@ -928,8 +960,7 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="SIZE|off",
         help=(
             "Purge --history-volume's persisted FSEvents history above this size. "
-            "Default: %s when the target is %s, off otherwise."
-            % (DEFAULT_HISTORY_CEILING, HISTORY_DEFAULT_PROCESS)
+            f"Default: {DEFAULT_HISTORY_CEILING} when the target is {HISTORY_DEFAULT_PROCESS}, off otherwise."
         ),
     )
     parser.add_argument(
@@ -947,7 +978,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(
-    argv: Optional[Sequence[str]] = None,
+    argv: Sequence[str] | None = None,
     now_fn: Callable[[], float] = time.time,
     sleep_fn: Callable[[float], None] = time.sleep,
     out: TextIO = sys.stdout,
@@ -1008,14 +1039,22 @@ def main(
     # EPERM otherwise) and to signal a system daemon. Checked up front so the
     # failure names its cause instead of surfacing as an empty measurement.
     if os.geteuid() != 0:
-        emit({"event": "not_root", "reason": "footprint read and signal both require root"}, out)
+        emit(
+            {
+                "event": "not_root",
+                "reason": "footprint read and signal both require root",
+            },
+            out,
+        )
         return EXIT_NOT_ROOT
 
     state_dir = str(args.state_dir)
     try:
         os.makedirs(state_dir, mode=0o700, exist_ok=True)
     except OSError as exc:
-        emit({"event": "state_dir_unusable", "path": state_dir, "reason": str(exc)}, out)
+        emit(
+            {"event": "state_dir_unusable", "path": state_dir, "reason": str(exc)}, out
+        )
         return EXIT_USAGE
 
     unsafe = unsafe_path_owners(state_dir)
@@ -1095,8 +1134,8 @@ def run_tick(
     cooldown_seconds: float,
     respawn_timeout: float,
     signal_name: str,
-    state_path: Optional[str],
-    context_command: Optional[str],
+    state_path: str | None,
+    context_command: str | None,
     dry_run: bool,
     now_fn: Callable[[], float],
     sleep_fn: Callable[[float], None],
@@ -1166,7 +1205,7 @@ def run_tick(
         )
         return EXIT_COOLDOWN_SUPPRESSED
 
-    before: Dict[str, object] = {
+    before: dict[str, object] = {
         "event": "ceiling_crossed",
         "process": spec,
         "ceiling_bytes": ceiling,
@@ -1199,7 +1238,14 @@ def run_tick(
                 out,
             )
             return EXIT_TARGET_AMBIGUOUS
-        emit({"event": "target_changed_before_signal", "process": spec, "pid": sample.pid}, out)
+        emit(
+            {
+                "event": "target_changed_before_signal",
+                "process": spec,
+                "pid": sample.pid,
+            },
+            out,
+        )
         return EXIT_TARGET_ABSENT
 
     # Stamped BEFORE the signal, which is the irreversible half. Anything that
@@ -1218,7 +1264,7 @@ def run_tick(
                 {
                     "event": "cooldown_stamp_failed",
                     "path": state_path,
-                    "reason": "%s; refusing to signal without a durable cooldown" % exc,
+                    "reason": f"{exc}; refusing to signal without a durable cooldown",
                 },
                 out,
             )

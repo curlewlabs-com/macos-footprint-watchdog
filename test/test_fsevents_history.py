@@ -22,11 +22,11 @@ import tempfile
 import time
 import unittest
 import uuid
-from typing import Dict, List, cast
+from typing import cast
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import footprint_watchdog as fw  # noqa: E402
+import footprint_watchdog as fw
 
 # Practical INFINITE for this runner, as in test_footprint_watchdog: no healthy
 # wait here is meant to reach it. fseventsd writes a journal file within
@@ -64,7 +64,7 @@ class ResolveHistoryCeilingTest(unittest.TestCase):
         self.assertIsNone(fw.resolve_history_ceiling("fseventsd", "OFF"))
 
     def test_an_explicit_size_wins_for_any_target(self) -> None:
-        self.assertEqual(fw.resolve_history_ceiling("mds_stores", "2GiB"), 2 * 1024 ** 3)
+        self.assertEqual(fw.resolve_history_ceiling("mds_stores", "2GiB"), 2 * 1024**3)
 
     def test_an_unparseable_ceiling_is_an_error_not_off(self) -> None:
         with self.assertRaises(ValueError):
@@ -98,10 +98,14 @@ class MountPointTest(unittest.TestCase):
             out=out,
         )
         self.assertEqual(code, fw.EXIT_USAGE)
-        self.assertEqual(json.loads(out.getvalue())["event"], "history_volume_not_mounted")
+        self.assertEqual(
+            json.loads(out.getvalue())["event"], "history_volume_not_mounted"
+        )
 
 
-@unittest.skipUnless(os.geteuid() == 0, "attaching a recorded volume and purging need root")
+@unittest.skipUnless(
+    os.geteuid() == 0, "attaching a recorded volume and purging need root"
+)
 class HistoryTickTest(unittest.TestCase):
     volume = ""
     image = ""
@@ -110,10 +114,21 @@ class HistoryTickTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.image_dir = tempfile.mkdtemp(prefix="footprint-watchdog-image.")
-        name = "fswatchdog-%s" % uuid.uuid4().hex[:8]
+        name = f"fswatchdog-{uuid.uuid4().hex[:8]}"
         cls.image = os.path.join(cls.image_dir, name + ".dmg")
         subprocess.run(
-            ["/usr/bin/hdiutil", "create", "-quiet", "-size", "64m", "-fs", "APFS", "-volname", name, cls.image],
+            [
+                "/usr/bin/hdiutil",
+                "create",
+                "-quiet",
+                "-size",
+                "64m",
+                "-fs",
+                "APFS",
+                "-volname",
+                name,
+                cls.image,
+            ],
             check=True,
         )
         # A plain attach, not -nobrowse: fseventsd keeps no history for a
@@ -123,7 +138,9 @@ class HistoryTickTest(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls) -> None:
-        subprocess.run(["/usr/bin/hdiutil", "detach", "-quiet", "-force", cls.volume], check=False)
+        subprocess.run(
+            ["/usr/bin/hdiutil", "detach", "-quiet", "-force", cls.volume], check=False
+        )
         subprocess.run(["rm", "-rf", cls.image_dir], check=False)
 
     def setUp(self) -> None:
@@ -135,13 +152,15 @@ class HistoryTickTest(unittest.TestCase):
         if os.path.exists(no_log):
             os.unlink(no_log)
 
-    def journal_files(self) -> List[str]:
+    def journal_files(self) -> list[str]:
         directory = os.path.join(self.volume, ".fseventsd")
         # fseventsd creates the directory with the volume's first recorded
         # change, not at attach.
         if not os.path.isdir(directory):
             return []
-        return sorted(name for name in os.listdir(directory) if _JOURNAL_NAME.fullmatch(name))
+        return sorted(
+            name for name in os.listdir(directory) if _JOURNAL_NAME.fullmatch(name)
+        )
 
     def churn_until_journals(self, count: int) -> None:
         """Write files until fseventsd has written `count` journal files."""
@@ -149,10 +168,12 @@ class HistoryTickTest(unittest.TestCase):
         round_number = 0
         while len(self.journal_files()) < count:
             if time.time() > deadline:
-                raise AssertionError("fseventsd wrote no journal within %.0fs" % INFINITE)
+                raise AssertionError(
+                    f"fseventsd wrote no journal within {INFINITE:.0f}s"
+                )
             round_number += 1
             for index in range(2000):
-                path = os.path.join(self.volume, "churn-%d-%d" % (round_number, index))
+                path = os.path.join(self.volume, f"churn-{round_number:d}-{index:d}")
                 with open(path, "w") as stream:
                     stream.write("x")
             time.sleep(1.0)
@@ -168,9 +189,9 @@ class HistoryTickTest(unittest.TestCase):
             out=self.out,
         )
 
-    def records(self) -> List[Dict[str, object]]:
+    def records(self) -> list[dict[str, object]]:
         return [
-            cast(Dict[str, object], json.loads(line))
+            cast(dict[str, object], json.loads(line))
             for line in self.out.getvalue().splitlines()
             if line
         ]
@@ -183,7 +204,7 @@ class HistoryTickTest(unittest.TestCase):
     def test_below_the_ceiling_writes_nothing_and_purges_nothing(self) -> None:
         self.churn_until_journals(1)
         before = self.measured()
-        self.assertEqual(self.tick(ceiling=before.history_bytes + 1024 ** 3), fw.EXIT_OK)
+        self.assertEqual(self.tick(ceiling=before.history_bytes + 1024**3), fw.EXIT_OK)
         self.assertEqual(self.out.getvalue(), "")
         self.assertEqual(self.measured().uuid, before.uuid)
 
@@ -197,20 +218,26 @@ class HistoryTickTest(unittest.TestCase):
         self.assertEqual(self.measured().uuid, before.uuid)
         self.assertFalse(os.path.exists(self.state_path))
 
-    def test_a_purge_shrinks_the_history_and_rotates_only_this_volumes_uuid(self) -> None:
+    def test_a_purge_shrinks_the_history_and_rotates_only_this_volumes_uuid(
+        self,
+    ) -> None:
         # The UUID is what tells a client its saved position is gone, so a purge
         # that changed it nowhere, or changed the host's, would be the bug.
         data_uuid = fw.history_uuid(os.stat(_DATA_VOLUME).st_dev)
         self.churn_until_journals(len(self.journal_files()) + 2)
         before = self.measured()
-        self.assertEqual(self.tick(ceiling=before.history_bytes - 1), fw.EXIT_OK, self.out.getvalue())
+        self.assertEqual(
+            self.tick(ceiling=before.history_bytes - 1), fw.EXIT_OK, self.out.getvalue()
+        )
         (record,) = [r for r in self.records() if r["event"] == "history_purged"]
-        after = cast(Dict[str, object], record["after"])
+        after = cast(dict[str, object], record["after"])
         self.assertLess(cast(int, after["history_bytes"]), before.history_bytes)
         self.assertNotEqual(after["uuid"], before.uuid)
         self.assertEqual(fw.history_uuid(os.stat(_DATA_VOLUME).st_dev), data_uuid)
 
-    def test_a_history_back_over_the_ceiling_inside_the_cooldown_is_not_purged_again(self) -> None:
+    def test_a_history_back_over_the_ceiling_inside_the_cooldown_is_not_purged_again(
+        self,
+    ) -> None:
         # Each purge forces every saved-position client to rescan; purging in a
         # loop would do that every tick.
         self.churn_until_journals(len(self.journal_files()) + 2)
