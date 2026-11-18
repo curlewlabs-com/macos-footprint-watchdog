@@ -63,40 +63,6 @@ jobs:
       - name: FSEvents history tests (root)
         run: sudo /usr/bin/python3 -m unittest discover -s test -p 'test_fsevents_history.py' -v
 
-  # Temporary, removed before merge: repeats the root FSEvents cases to
-  # measure the remount flush, and measures the old churn wait beside it.
-  fsevents-repeat:
-    runs-on: macos-26
-    strategy:
-      fail-fast: false
-      matrix:
-        run: [1, 2, 3, 4, 5]
-        order: [probe-first, suite-first]
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Host state
-        run: |
-          sysctl kern.boottime
-          uptime
-          sw_vers
-      - name: Probe the old churn wait (probe-first)
-        if: matrix.order == 'probe-first'
-        continue-on-error: true
-        run: sudo /usr/bin/python3 -I "$GITHUB_WORKSPACE/.github/churn_probe.py"
-      - name: Root FSEvents cases, five times
-        run: |
-          for i in 1 2 3 4 5; do
-            start=$(date +%s)
-            sudo /usr/bin/python3 -m unittest discover -s test -p 'test_fsevents_history.py' -v || exit 1
-            echo "iteration $i took $(( $(date +%s) - start ))s"
-          done
-      - name: Probe the old churn wait (suite-first)
-        if: matrix.order == 'suite-first'
-        continue-on-error: true
-        run: sudo /usr/bin/python3 -I "$GITHUB_WORKSPACE/.github/churn_probe.py"
-
   baseline:
     # The checks every Curlew Labs repository runs, in one place:
     # https://github.com/curlewlabs-com/ci-baseline
