@@ -230,6 +230,9 @@ def write_plist(
     handle, temp_path = tempfile.mkstemp(dir=directory)
     with os.fdopen(handle, "wb") as stream:
         plistlib.dump(contents, stream, sort_keys=True)
+    # World-readable on purpose (0644 by default): --verify reads the job file
+    # without privileges, and it holds nothing secret. What launchd and the
+    # threat both turn on is the write bits, and group and other get none.
     os.chmod(temp_path, mode)
     os.replace(temp_path, target_path)
 
@@ -251,6 +254,10 @@ def install_executable(source: str, destination: str) -> None:
     try:
         with os.fdopen(handle, "wb") as target, open(source, "rb") as stream:
             shutil.copyfileobj(stream, target)
+        # World-readable on purpose: --verify compares this file against the
+        # checkout without privileges, and its content is this repository's
+        # source. Only a write bit would let another account choose what root
+        # runs, and group and other get none.
         os.chmod(temp_path, 0o755)
     except OSError:
         os.unlink(temp_path)

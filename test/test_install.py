@@ -272,7 +272,8 @@ class VerifyTest(unittest.TestCase):
         shutil.copyfile(os.path.join(install.REPO_ROOT, install.SOURCE_NAME), installed)
         # copyfile does not carry the mode over, and do_install sets 0755. Match
         # a real install here, or the exec-bit case below would assert against a
-        # file that was never executable and could not fail.
+        # file that was never executable and could not fail. The mode is
+        # install.py's own, world-readable for the same reason.
         os.chmod(installed, 0o755)
         self.args = argparse.Namespace(
             process="fseventsd",
@@ -365,12 +366,14 @@ class VerifyTest(unittest.TestCase):
 
     def test_an_installed_file_launchd_cannot_execute_is_drift(self) -> None:
         # Content, owner, and write bits can all be right on a 0644 file, and a
-        # watchdog that never runs reports nothing at all.
+        # watchdog that never runs reports nothing at all. The mode is the
+        # drift under test, on a temporary file.
         os.chmod(os.path.join(self.prefix, install.INSTALLED_NAME), 0o644)
         self.assertIn("executable_not_executable", self.codes())
 
     def test_a_world_writable_executable_is_drift(self) -> None:
         # The privilege-escalation shape: root runs this file every interval.
+        # The world-writable mode is the drift under test, on a temporary file.
         os.chmod(os.path.join(self.prefix, install.INSTALLED_NAME), 0o777)
         self.assertIn("executable_writable_by_non_root", self.codes())
 
