@@ -299,16 +299,15 @@ with `--ceiling 1 --dry-run` and look at the `path` field.
 /usr/bin/python3 -m unittest discover -s test -v   # needs macOS and cc
 sudo /usr/bin/python3 -m unittest discover -s test -p 'test_fsevents_history.py' -v
 pip install -r requirements-dev.txt && mypy        # strict, runs anywhere
-npx pyright@<version>                              # strict, runs anywhere
 ```
 
-Use the mypy `requirements-dev.txt` pins and the pyright release
-`.github/workflows/ci.yml` pins; another release can report different errors
-than CI does. mypy cannot check for Python 3.9, so it checks for 3.10; pyright
-and the tests on `/usr/bin/python3` hold the 3.9 floor. CI also runs the checks
-every Curlew Labs repository shares
-([ci-baseline](https://github.com/curlewlabs-com/ci-baseline)), among them ruff
-and prettier, under this repository's `pyproject.toml`.
+Use the mypy `requirements-dev.txt` pins; another release can report different
+errors than CI does. mypy cannot check for Python 3.9, so it checks for 3.10;
+pyright and the tests on `/usr/bin/python3` hold the 3.9 floor. CI also runs
+the checks every Curlew Labs repository shares
+([ci-baseline](https://github.com/curlewlabs-com/ci-baseline)), among them
+strict pyright, ruff and prettier, under this repository's `pyproject.toml`:
+the Python floor is ruff's `target-version` and the platform is mypy's.
 
 The history purge cases need root and skip without it. They attach a small APFS
 disk image, churn files on it until `fseventsd` has written journals, and purge

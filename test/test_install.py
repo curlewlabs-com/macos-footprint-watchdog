@@ -49,17 +49,25 @@ class LabelTest(unittest.TestCase):
 class GeneratedArgumentsTest(unittest.TestCase):
     """The installer's output has to be input the watchdog accepts."""
 
-    def parse_generated(self, **kwargs: object) -> list[str]:
+    def parse_generated(
+        self,
+        process: str = "fseventsd",
+        ceiling: str = "2GiB",
+        cooldown: int | None = None,
+        context_command: str | None = None,
+        signal_name: str | None = None,
+        history_ceiling: str | None = None,
+    ) -> list[str]:
         contents = install.build_plist(
-            process=str(kwargs.get("process", "fseventsd")),
-            ceiling=str(kwargs.get("ceiling", "2GiB")),
+            process=process,
+            ceiling=ceiling,
             interval=300,
             executable="/usr/local/sbin/footprint-watchdog",
             log_path="/var/log/footprint-watchdog.log",
-            cooldown=kwargs.get("cooldown"),  # type: ignore[arg-type]
-            context_command=kwargs.get("context_command"),  # type: ignore[arg-type]
-            signal_name=kwargs.get("signal_name"),  # type: ignore[arg-type]
-            history_ceiling=kwargs.get("history_ceiling"),  # type: ignore[arg-type]
+            cooldown=cooldown,
+            context_command=context_command,
+            signal_name=signal_name,
+            history_ceiling=history_ceiling,
         )
         return cast(list[str], contents["ProgramArguments"])
 
