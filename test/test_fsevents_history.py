@@ -29,6 +29,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import footprint_watchdog as fw
 
+# Practical INFINITE for this runner: the one wait here, for fseventsd to take
+# up a volume after a mount, is not meant to reach it. Higher than
+# test_footprint_watchdog's because what it waits on is a system daemon, and
+# on CI these cases can run a minute after the runner boots, with the load
+# average above a hundred.
+INFINITE = 300.0
 _JOURNAL_NAME = re.compile(r"[0-9a-f]{16}")
 _DATA_VOLUME = "/System/Volumes/Data"
 
@@ -147,6 +153,36 @@ class HistoryTickTest(unittest.TestCase):
         (cls.volume,) = [
             str(entity["mount-point"]) for entity in entities if "mount-point" in entity
         ]
+        cls.wait_for_fseventsd()
+
+    @classmethod
+    def wait_for_fseventsd(cls) -> None:
+        """Block until fseventsd has taken up the volume just attached.
+
+        It does that asynchronously after the mount, and on a runner a minute
+        after boot it took long enough that a case asking for the store's UUID
+        right after a reattach got none. fseventsd answers a volume's UUID once
+        it has the volume's history open, so that answer is the readiness this
+        waits for. A fresh volume has no history until its first recorded
+        change, so each poll makes one: the wait never depends on a change
+        fseventsd might have seen before it was ready.
+        """
+        device = os.stat(cls.volume).st_dev
+        started = time.monotonic()
+        while fw.history_uuid(device) is None:
+            if time.monotonic() - started > INFINITE:
+                raise AssertionError(
+                    f"fseventsd did not take up {cls.volume} within {INFINITE:.0f}s"
+                )
+            with open(os.path.join(cls.volume, "attached"), "w") as stream:
+                stream.write("x")
+            time.sleep(0.1)
+        waited = time.monotonic() - started
+        if waited > 1.0:
+            print(
+                f"fseventsd took {waited:.1f}s to take up {cls.volume}",
+                file=sys.stderr,
+            )
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -178,9 +214,24 @@ class HistoryTickTest(unittest.TestCase):
         )
 
     def remount(self) -> None:
-        subprocess.run(
-            ["/usr/bin/hdiutil", "detach", "-quiet", self.volume], check=True
+        detach = subprocess.run(
+            ["/usr/bin/hdiutil", "detach", self.volume],
+            capture_output=True,
+            text=True,
+            check=False,
         )
+        if detach.returncode != 0:
+            # Name whatever held the volume, so a refusal says who refused.
+            holders = subprocess.run(
+                ["/usr/sbin/lsof", "+f", "--", self.volume],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.fail(
+                f"detach of {self.volume} exited {detach.returncode}: "
+                f"{detach.stderr.strip()}\nopen on it:\n{holders.stdout}"
+            )
         type(self).attach()
 
     def record_history(self, batches: int) -> None:
