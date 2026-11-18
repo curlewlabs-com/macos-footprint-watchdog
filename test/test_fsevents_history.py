@@ -111,13 +111,16 @@ class MountPointTest(unittest.TestCase):
 )
 class HistoryTickTest(unittest.TestCase):
     volume = ""
-    device = ""
     image = ""
     image_dir = ""
 
     @classmethod
     def setUpClass(cls) -> None:
         cls.image_dir = tempfile.mkdtemp(prefix="footprint-watchdog-image.")
+        # A class cleanup rather than tearDownClass, which unittest skips when
+        # setUpClass raises: an attach that fails partway, or a wait for
+        # fseventsd that runs out, would otherwise leave the image attached.
+        cls.addClassCleanup(cls.release)
         name = f"fswatchdog-{uuid.uuid4().hex[:8]}"
         cls.image = os.path.join(cls.image_dir, name + ".dmg")
         subprocess.run(
@@ -154,14 +157,35 @@ class HistoryTickTest(unittest.TestCase):
         (cls.volume,) = [
             str(entity["mount-point"]) for entity in entities if "mount-point" in entity
         ]
-        # The image's own disk, not the APFS container synthesized on it:
-        # detaching that one takes the container and the volume with it.
-        (cls.device,) = [
-            str(entity["dev-entry"])
-            for entity in entities
-            if entity.get("content-hint") == "GUID_partition_scheme"
-        ]
         cls.wait_for_fseventsd()
+
+    @classmethod
+    def attached_device(cls) -> str | None:
+        """The disk this class's image is attached as right now, or None.
+
+        Asked of hdiutil by the image's path every time rather than remembered:
+        once a detach goes through, the disk number it freed can be handed to
+        any image attached after it, and every detach here runs as root.
+        Remembering the number would let a cleanup after a failed reattach, or
+        a retry after a detach that went through anyway, eject someone else's
+        disk. The image's own disk, not the APFS container synthesized on it:
+        detaching that one takes the container and the volume with it.
+        """
+        if not cls.image:
+            return None
+        listing = subprocess.run(
+            ["/usr/bin/hdiutil", "info", "-plist"], check=True, capture_output=True
+        ).stdout
+        images = cast(list[dict[str, object]], plistlib.loads(listing)["images"])
+        ours = os.path.realpath(cls.image)
+        for image in images:
+            if os.path.realpath(str(image["image-path"])) != ours:
+                continue
+            entities = cast(list[dict[str, object]], image["system-entities"])
+            for entity in entities:
+                if entity.get("content-hint") == "GUID_partition_scheme":
+                    return str(entity["dev-entry"])
+        return None
 
     @classmethod
     def wait_for_fseventsd(cls) -> None:
@@ -193,12 +217,13 @@ class HistoryTickTest(unittest.TestCase):
             )
 
     @classmethod
-    def tearDownClass(cls) -> None:
-        # Empty when a reattach failed: the number of a disk this class already
-        # detached can belong to someone else's image by now.
-        if cls.device:
+    def release(cls) -> None:
+        # Forced, unlike a remount's detach: whatever state a failed case left
+        # the image in, nothing after this needs its history.
+        device = cls.attached_device()
+        if device is not None:
             subprocess.run(
-                ["/usr/bin/hdiutil", "detach", "-quiet", "-force", cls.device],
+                ["/usr/bin/hdiutil", "detach", "-quiet", "-force", device],
                 check=False,
             )
         subprocess.run(["rm", "-rf", cls.image_dir], check=False)
@@ -234,21 +259,25 @@ class HistoryTickTest(unittest.TestCase):
 
         Shortly after boot hdiutil has unmounted the volume and then failed to
         eject the disk with "Resource busy", with nothing open on the volume.
-        The disk frees itself; nothing here can hurry it. Retrying names the
-        whole disk, so a retry after the unmount went through ejects what is
-        left rather than looking for a mount point that is already gone.
+        The disk frees itself; nothing here can hurry it. Each attempt names
+        the image's whole disk as hdiutil reports it at that moment, so a retry
+        after the unmount went through ejects what is left rather than looking
+        for a mount point that is already gone, and a refusal that detached
+        the image anyway ends the loop instead of naming a freed disk.
         """
         started = time.monotonic()
         refusals: list[str] = []
         while True:
+            device = self.attached_device()
+            if device is None:
+                break
             detach = subprocess.run(
-                ["/usr/bin/hdiutil", "detach", self.device],
+                ["/usr/bin/hdiutil", "detach", device],
                 capture_output=True,
                 text=True,
                 check=False,
             )
             if detach.returncode == 0:
-                type(self).device = ""
                 break
             # Name whatever held the volume, so a refusal says who refused.
             holders = subprocess.run(
@@ -258,7 +287,7 @@ class HistoryTickTest(unittest.TestCase):
                 check=False,
             )
             refusal = (
-                f"detach of {self.device} exited {detach.returncode}: "
+                f"detach of {device} exited {detach.returncode}: "
                 f"{detach.stderr.strip()}; open on {self.volume}: "
                 f"{holders.stdout.strip() or 'nothing'}"
             )
