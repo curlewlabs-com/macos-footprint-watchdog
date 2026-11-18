@@ -15,6 +15,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import plistlib
 import re
 import subprocess
 import sys
@@ -28,10 +29,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import footprint_watchdog as fw
 
-# Practical INFINITE for this runner, as in test_footprint_watchdog: no healthy
-# wait here is meant to reach it. fseventsd writes a journal file within
-# seconds of the churn that fills it.
-INFINITE = 60.0
+# Practical INFINITE for this runner: neither wait here, for fseventsd to take
+# up a volume after a mount and for a busy disk to eject, is meant to reach it.
+# Higher than test_footprint_watchdog's because what they wait on is the
+# system, and on CI these cases can run a minute after the runner boots, with
+# the load average above a hundred.
+INFINITE = 300.0
 _JOURNAL_NAME = re.compile(r"[0-9a-f]{16}")
 _DATA_VOLUME = "/System/Volumes/Data"
 
@@ -114,6 +117,10 @@ class HistoryTickTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.image_dir = tempfile.mkdtemp(prefix="footprint-watchdog-image.")
+        # A class cleanup rather than tearDownClass, which unittest skips when
+        # setUpClass raises: an attach that fails partway, or a wait for
+        # fseventsd that runs out, would otherwise leave the image attached.
+        cls.addClassCleanup(cls.release)
         name = f"fswatchdog-{uuid.uuid4().hex[:8]}"
         cls.image = os.path.join(cls.image_dir, name + ".dmg")
         subprocess.run(
@@ -131,16 +138,94 @@ class HistoryTickTest(unittest.TestCase):
             ],
             check=True,
         )
-        # A plain attach, not -nobrowse: fseventsd keeps no history for a
-        # volume attached hidden, and a test volume without one tests nothing.
-        subprocess.run(["/usr/bin/hdiutil", "attach", "-quiet", cls.image], check=True)
-        cls.volume = os.path.join("/Volumes", name)
+        cls.attach()
 
     @classmethod
-    def tearDownClass(cls) -> None:
-        subprocess.run(
-            ["/usr/bin/hdiutil", "detach", "-quiet", "-force", cls.volume], check=False
+    def attach(cls) -> None:
+        # A plain attach, not -nobrowse: fseventsd keeps no history for a
+        # volume attached hidden, and a test volume without one tests nothing.
+        # The mount point is read back rather than assumed, since a reattach
+        # can land on another path if the last one is still being torn down.
+        listing = subprocess.run(
+            ["/usr/bin/hdiutil", "attach", "-plist", cls.image],
+            check=True,
+            capture_output=True,
+        ).stdout
+        entities = cast(
+            list[dict[str, object]], plistlib.loads(listing)["system-entities"]
         )
+        (cls.volume,) = [
+            str(entity["mount-point"]) for entity in entities if "mount-point" in entity
+        ]
+        cls.wait_for_fseventsd()
+
+    @classmethod
+    def attached_device(cls) -> str | None:
+        """The disk this class's image is attached as right now, or None.
+
+        Asked of hdiutil by the image's path every time rather than remembered:
+        once a detach goes through, the disk number it freed can be handed to
+        any image attached after it, and every detach here runs as root.
+        Remembering the number would let a cleanup after a failed reattach, or
+        a retry after a detach that went through anyway, eject someone else's
+        disk. The image's own disk, not the APFS container synthesized on it:
+        detaching that one takes the container and the volume with it.
+        """
+        if not cls.image:
+            return None
+        listing = subprocess.run(
+            ["/usr/bin/hdiutil", "info", "-plist"], check=True, capture_output=True
+        ).stdout
+        images = cast(list[dict[str, object]], plistlib.loads(listing)["images"])
+        ours = os.path.realpath(cls.image)
+        for image in images:
+            if os.path.realpath(str(image["image-path"])) != ours:
+                continue
+            entities = cast(list[dict[str, object]], image["system-entities"])
+            for entity in entities:
+                if entity.get("content-hint") == "GUID_partition_scheme":
+                    return str(entity["dev-entry"])
+        return None
+
+    @classmethod
+    def wait_for_fseventsd(cls) -> None:
+        """Block until fseventsd has taken up the volume just attached.
+
+        It does that asynchronously after the mount, and on a runner a minute
+        after boot it took long enough that a case asking for the store's UUID
+        right after a reattach got none. fseventsd answers a volume's UUID once
+        it has the volume's history open, so that answer is the readiness this
+        waits for. A fresh volume has no history until its first recorded
+        change, so each poll makes one: the wait never depends on a change
+        fseventsd might have seen before it was ready.
+        """
+        device = os.stat(cls.volume).st_dev
+        started = time.monotonic()
+        while fw.history_uuid(device) is None:
+            if time.monotonic() - started > INFINITE:
+                raise AssertionError(
+                    f"fseventsd did not take up {cls.volume} within {INFINITE:.0f}s"
+                )
+            with open(os.path.join(cls.volume, "attached"), "w") as stream:
+                stream.write("x")
+            time.sleep(0.1)
+        waited = time.monotonic() - started
+        if waited > 1.0:
+            print(
+                f"fseventsd took {waited:.1f}s to take up {cls.volume}",
+                file=sys.stderr,
+            )
+
+    @classmethod
+    def release(cls) -> None:
+        # Forced, unlike a remount's detach: whatever state a failed case left
+        # the image in, nothing after this needs its history.
+        device = cls.attached_device()
+        if device is not None:
+            subprocess.run(
+                ["/usr/bin/hdiutil", "detach", "-quiet", "-force", device],
+                check=False,
+            )
         subprocess.run(["rm", "-rf", cls.image_dir], check=False)
 
     def setUp(self) -> None:
@@ -151,6 +236,9 @@ class HistoryTickTest(unittest.TestCase):
         no_log = os.path.join(self.volume, ".fseventsd", "no_log")
         if os.path.exists(no_log):
             os.unlink(no_log)
+            # On macOS 26 a volume whose marker was removed while it was
+            # mounted recorded nothing more until it was mounted again.
+            self.remount()
 
     def journal_files(self) -> list[str]:
         directory = os.path.join(self.volume, ".fseventsd")
@@ -162,21 +250,81 @@ class HistoryTickTest(unittest.TestCase):
             name for name in os.listdir(directory) if _JOURNAL_NAME.fullmatch(name)
         )
 
-    def churn_until_journals(self, count: int) -> None:
-        """Write files until fseventsd has written `count` journal files."""
-        deadline = time.time() + INFINITE
-        round_number = 0
-        while len(self.journal_files()) < count:
-            if time.time() > deadline:
-                raise AssertionError(
-                    f"fseventsd wrote no journal within {INFINITE:.0f}s"
-                )
-            round_number += 1
-            for index in range(2000):
-                path = os.path.join(self.volume, f"churn-{round_number:d}-{index:d}")
+    def remount(self) -> None:
+        self.detach()
+        type(self).attach()
+
+    def detach(self) -> None:
+        """Detach the image, unforced, retrying while macOS calls it busy.
+
+        Shortly after boot hdiutil has unmounted the volume and then failed to
+        eject the disk with "Resource busy", with nothing open on the volume.
+        The disk frees itself; nothing here can hurry it. Each attempt names
+        the image's whole disk as hdiutil reports it at that moment, so a retry
+        after the unmount went through ejects what is left rather than looking
+        for a mount point that is already gone, and a refusal that detached
+        the image anyway ends the loop instead of naming a freed disk.
+        """
+        started = time.monotonic()
+        refusals: list[str] = []
+        while True:
+            device = self.attached_device()
+            if device is None:
+                break
+            detach = subprocess.run(
+                ["/usr/bin/hdiutil", "detach", device],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if detach.returncode == 0:
+                break
+            # Name whatever held the volume, so a refusal says who refused.
+            holders = subprocess.run(
+                ["/usr/sbin/lsof", "+f", "--", self.volume],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            refusal = (
+                f"detach of {device} exited {detach.returncode}: "
+                f"{detach.stderr.strip()}; open on {self.volume}: "
+                f"{holders.stdout.strip() or 'nothing'}"
+            )
+            print(refusal, file=sys.stderr)
+            refusals.append(refusal)
+            if time.monotonic() - started > INFINITE:
+                self.fail("\n".join(refusals))
+            time.sleep(1.0)
+
+    def record_history(self, batches: int) -> None:
+        """Make changes on the volume and have fseventsd write them to a new
+        journal file, `batches` times over.
+
+        By remounting, not by writing until a journal shows up. fseventsd holds
+        a volume's recent events in memory and writes a journal file when that
+        buffer fills, at a size it does not publish; how long a burst of writes
+        takes to fill it depends on how fast the runner's disk and fseventsd
+        are at the time, and on a busy CI runner a minute of writes has passed
+        without one. Unmounting is the trigger fseventsd always
+        answers: it writes out what it holds for the volume and closes its
+        journal, and an unforced detach cannot complete while that file is
+        still open on the volume. So each new journal is on disk by the time
+        the detach returns, and the check after the reattach needs no wait.
+        """
+        for _ in range(batches):
+            before = self.journal_files()
+            batch = uuid.uuid4().hex[:8]
+            for index in range(100):
+                path = os.path.join(self.volume, f"change-{batch}-{index:d}")
                 with open(path, "w") as stream:
                     stream.write("x")
-            time.sleep(1.0)
+            self.remount()
+            after = self.journal_files()
+            self.assertTrue(
+                set(after) - set(before),
+                f"no new journal file after a remount: before {before}, after {after}",
+            )
 
     def tick(self, ceiling: int, dry_run: bool = False) -> int:
         return fw.run_history_tick(
@@ -202,14 +350,14 @@ class HistoryTickTest(unittest.TestCase):
         return sample
 
     def test_below_the_ceiling_writes_nothing_and_purges_nothing(self) -> None:
-        self.churn_until_journals(1)
+        self.record_history(1)
         before = self.measured()
         self.assertEqual(self.tick(ceiling=before.history_bytes + 1024**3), fw.EXIT_OK)
         self.assertEqual(self.out.getvalue(), "")
         self.assertEqual(self.measured().uuid, before.uuid)
 
     def test_a_dry_run_reports_the_crossing_and_leaves_the_store_alone(self) -> None:
-        self.churn_until_journals(2)
+        self.record_history(2)
         before = self.measured()
         self.assertEqual(self.tick(ceiling=1, dry_run=True), fw.EXIT_OK)
         (record,) = self.records()
@@ -224,7 +372,7 @@ class HistoryTickTest(unittest.TestCase):
         # The UUID is what tells a client its saved position is gone, so a purge
         # that changed it nowhere, or changed the host's, would be the bug.
         data_uuid = fw.history_uuid(os.stat(_DATA_VOLUME).st_dev)
-        self.churn_until_journals(len(self.journal_files()) + 2)
+        self.record_history(2)
         before = self.measured()
         self.assertEqual(
             self.tick(ceiling=before.history_bytes - 1), fw.EXIT_OK, self.out.getvalue()
@@ -240,12 +388,12 @@ class HistoryTickTest(unittest.TestCase):
     ) -> None:
         # Each purge forces every saved-position client to rescan; purging in a
         # loop would do that every tick.
-        self.churn_until_journals(len(self.journal_files()) + 2)
+        self.record_history(2)
         ceiling = self.measured().history_bytes - 1
         self.assertEqual(self.tick(ceiling=ceiling), fw.EXIT_OK, self.out.getvalue())
         rotated = self.measured().uuid
         while self.measured().history_bytes <= ceiling:
-            self.churn_until_journals(len(self.journal_files()) + 1)
+            self.record_history(1)
         self.assertEqual(self.tick(ceiling=ceiling), fw.EXIT_COOLDOWN_SUPPRESSED)
         self.assertEqual(self.records()[-1]["event"], "history_cooldown_suppressed")
         self.assertEqual(self.measured().uuid, rotated)
@@ -253,7 +401,7 @@ class HistoryTickTest(unittest.TestCase):
     def test_a_volume_whose_owner_turned_history_off_is_left_alone(self) -> None:
         # A CI guest with the no_log marker runs this same tick every interval;
         # its switched-off history is a configuration, not a failure.
-        self.churn_until_journals(1)
+        self.record_history(1)
         with open(os.path.join(self.volume, ".fseventsd", "no_log"), "w"):
             pass
         self.assertEqual(self.tick(ceiling=1), fw.EXIT_OK)
