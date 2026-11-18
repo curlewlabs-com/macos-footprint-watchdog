@@ -359,7 +359,8 @@ class UnsafePathTest(unittest.TestCase):
 
     def test_a_writable_ancestor_makes_a_locked_leaf_unsafe(self) -> None:
         # A leaf nobody can write is no protection if its parent can be swapped
-        # out from under it.
+        # out from under it. The world-writable mode is the unsafe ancestor
+        # under test, on a temporary directory.
         parent = os.path.join(self.directory, "parent")
         leaf = os.path.join(parent, "leaf")
         os.makedirs(leaf)
