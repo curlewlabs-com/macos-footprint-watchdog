@@ -163,6 +163,9 @@ class HistoryTickTest(unittest.TestCase):
         no_log = os.path.join(self.volume, ".fseventsd", "no_log")
         if os.path.exists(no_log):
             os.unlink(no_log)
+            # On macOS 26 a volume whose marker was removed while it was
+            # mounted recorded nothing more until it was mounted again.
+            self.remount()
 
     def journal_files(self) -> list[str]:
         directory = os.path.join(self.volume, ".fseventsd")
@@ -173,6 +176,12 @@ class HistoryTickTest(unittest.TestCase):
         return sorted(
             name for name in os.listdir(directory) if _JOURNAL_NAME.fullmatch(name)
         )
+
+    def remount(self) -> None:
+        subprocess.run(
+            ["/usr/bin/hdiutil", "detach", "-quiet", self.volume], check=True
+        )
+        type(self).attach()
 
     def record_history(self, batches: int) -> None:
         """Make changes on the volume and have fseventsd write them to a new
@@ -196,10 +205,7 @@ class HistoryTickTest(unittest.TestCase):
                 path = os.path.join(self.volume, f"change-{batch}-{index:d}")
                 with open(path, "w") as stream:
                     stream.write("x")
-            subprocess.run(
-                ["/usr/bin/hdiutil", "detach", "-quiet", self.volume], check=True
-            )
-            type(self).attach()
+            self.remount()
             after = self.journal_files()
             self.assertTrue(
                 set(after) - set(before),
