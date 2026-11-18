@@ -15,6 +15,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import plistlib
 import re
 import subprocess
 import sys
@@ -28,10 +29,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import footprint_watchdog as fw
 
-# Practical INFINITE for this runner, as in test_footprint_watchdog: no healthy
-# wait here is meant to reach it. fseventsd writes a journal file within
-# seconds of the churn that fills it.
-INFINITE = 60.0
 _JOURNAL_NAME = re.compile(r"[0-9a-f]{16}")
 _DATA_VOLUME = "/System/Volumes/Data"
 
@@ -131,10 +128,25 @@ class HistoryTickTest(unittest.TestCase):
             ],
             check=True,
         )
+        cls.attach()
+
+    @classmethod
+    def attach(cls) -> None:
         # A plain attach, not -nobrowse: fseventsd keeps no history for a
         # volume attached hidden, and a test volume without one tests nothing.
-        subprocess.run(["/usr/bin/hdiutil", "attach", "-quiet", cls.image], check=True)
-        cls.volume = os.path.join("/Volumes", name)
+        # The mount point is read back rather than assumed, since a reattach
+        # can land on another path if the last one is still being torn down.
+        listing = subprocess.run(
+            ["/usr/bin/hdiutil", "attach", "-plist", cls.image],
+            check=True,
+            capture_output=True,
+        ).stdout
+        entities = cast(
+            list[dict[str, object]], plistlib.loads(listing)["system-entities"]
+        )
+        (cls.volume,) = [
+            str(entity["mount-point"]) for entity in entities if "mount-point" in entity
+        ]
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -162,21 +174,37 @@ class HistoryTickTest(unittest.TestCase):
             name for name in os.listdir(directory) if _JOURNAL_NAME.fullmatch(name)
         )
 
-    def churn_until_journals(self, count: int) -> None:
-        """Write files until fseventsd has written `count` journal files."""
-        deadline = time.time() + INFINITE
-        round_number = 0
-        while len(self.journal_files()) < count:
-            if time.time() > deadline:
-                raise AssertionError(
-                    f"fseventsd wrote no journal within {INFINITE:.0f}s"
-                )
-            round_number += 1
-            for index in range(2000):
-                path = os.path.join(self.volume, f"churn-{round_number:d}-{index:d}")
+    def record_history(self, batches: int) -> None:
+        """Make changes on the volume and have fseventsd write them to a new
+        journal file, `batches` times over.
+
+        By remounting, not by writing until a journal shows up. fseventsd holds
+        a volume's recent events in memory and writes a journal file when that
+        buffer fills, at a size it does not publish; how long a burst of writes
+        takes to fill it depends on how fast the runner's disk and fseventsd
+        are at the time, and on a busy CI runner a minute of writes has passed
+        without one. Unmounting is the trigger fseventsd always
+        answers: it writes out what it holds for the volume and closes its
+        journal, and an unforced detach cannot complete while that file is
+        still open on the volume. So each new journal is on disk by the time
+        the detach returns, and the check after the reattach needs no wait.
+        """
+        for _ in range(batches):
+            before = self.journal_files()
+            batch = uuid.uuid4().hex[:8]
+            for index in range(100):
+                path = os.path.join(self.volume, f"change-{batch}-{index:d}")
                 with open(path, "w") as stream:
                     stream.write("x")
-            time.sleep(1.0)
+            subprocess.run(
+                ["/usr/bin/hdiutil", "detach", "-quiet", self.volume], check=True
+            )
+            type(self).attach()
+            after = self.journal_files()
+            self.assertTrue(
+                set(after) - set(before),
+                f"no new journal file after a remount: before {before}, after {after}",
+            )
 
     def tick(self, ceiling: int, dry_run: bool = False) -> int:
         return fw.run_history_tick(
@@ -202,14 +230,14 @@ class HistoryTickTest(unittest.TestCase):
         return sample
 
     def test_below_the_ceiling_writes_nothing_and_purges_nothing(self) -> None:
-        self.churn_until_journals(1)
+        self.record_history(1)
         before = self.measured()
         self.assertEqual(self.tick(ceiling=before.history_bytes + 1024**3), fw.EXIT_OK)
         self.assertEqual(self.out.getvalue(), "")
         self.assertEqual(self.measured().uuid, before.uuid)
 
     def test_a_dry_run_reports_the_crossing_and_leaves_the_store_alone(self) -> None:
-        self.churn_until_journals(2)
+        self.record_history(2)
         before = self.measured()
         self.assertEqual(self.tick(ceiling=1, dry_run=True), fw.EXIT_OK)
         (record,) = self.records()
@@ -224,7 +252,7 @@ class HistoryTickTest(unittest.TestCase):
         # The UUID is what tells a client its saved position is gone, so a purge
         # that changed it nowhere, or changed the host's, would be the bug.
         data_uuid = fw.history_uuid(os.stat(_DATA_VOLUME).st_dev)
-        self.churn_until_journals(len(self.journal_files()) + 2)
+        self.record_history(2)
         before = self.measured()
         self.assertEqual(
             self.tick(ceiling=before.history_bytes - 1), fw.EXIT_OK, self.out.getvalue()
@@ -240,12 +268,12 @@ class HistoryTickTest(unittest.TestCase):
     ) -> None:
         # Each purge forces every saved-position client to rescan; purging in a
         # loop would do that every tick.
-        self.churn_until_journals(len(self.journal_files()) + 2)
+        self.record_history(2)
         ceiling = self.measured().history_bytes - 1
         self.assertEqual(self.tick(ceiling=ceiling), fw.EXIT_OK, self.out.getvalue())
         rotated = self.measured().uuid
         while self.measured().history_bytes <= ceiling:
-            self.churn_until_journals(len(self.journal_files()) + 1)
+            self.record_history(1)
         self.assertEqual(self.tick(ceiling=ceiling), fw.EXIT_COOLDOWN_SUPPRESSED)
         self.assertEqual(self.records()[-1]["event"], "history_cooldown_suppressed")
         self.assertEqual(self.measured().uuid, rotated)
@@ -253,7 +281,7 @@ class HistoryTickTest(unittest.TestCase):
     def test_a_volume_whose_owner_turned_history_off_is_left_alone(self) -> None:
         # A CI guest with the no_log marker runs this same tick every interval;
         # its switched-off history is a configuration, not a failure.
-        self.churn_until_journals(1)
+        self.record_history(1)
         with open(os.path.join(self.volume, ".fseventsd", "no_log"), "w"):
             pass
         self.assertEqual(self.tick(ceiling=1), fw.EXIT_OK)
