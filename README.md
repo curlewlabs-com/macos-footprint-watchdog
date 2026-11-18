@@ -298,11 +298,17 @@ with `--ceiling 1 --dry-run` and look at the `path` field.
 ```sh
 /usr/bin/python3 -m unittest discover -s test -v   # needs macOS and cc
 sudo /usr/bin/python3 -m unittest discover -s test -p 'test_fsevents_history.py' -v
+pip install -r requirements-dev.txt && mypy        # strict, runs anywhere
 npx pyright@<version>                              # strict, runs anywhere
 ```
 
-Use the pyright release `.github/workflows/ci.yml` pins; another release can
-report different errors than CI does.
+Use the mypy `requirements-dev.txt` pins and the pyright release
+`.github/workflows/ci.yml` pins; another release can report different errors
+than CI does. mypy cannot check for Python 3.9, so it checks for 3.10; pyright
+and the tests on `/usr/bin/python3` hold the 3.9 floor. CI also runs the checks
+every Curlew Labs repository shares
+([ci-baseline](https://github.com/curlewlabs-com/ci-baseline)), among them ruff
+and prettier, under this repository's `pyproject.toml`.
 
 The history purge cases need root and skip without it. They attach a small APFS
 disk image, churn files on it until `fseventsd` has written journals, and purge
@@ -314,9 +320,8 @@ supervisor replace it - rather than mocking the measurement. See the docstring
 in `test/test_footprint_watchdog.py` for why, and `test/footprint_target.c` for
 why the target has to be compiled per run.
 
-CI runs both on `macos-15` and `macos-26`. The thing being read is a kernel
-structure, so a change between major versions is the regression most worth
-catching.
+CI runs them on `macos-26`. The thing being read is a kernel structure, so a
+change in it is the regression most worth catching.
 
 ## License
 
